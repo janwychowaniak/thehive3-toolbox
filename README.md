@@ -205,13 +205,18 @@ built to stay cheap even on indices holding millions of cases:
   the inverted index. Wildcard and `query_string` queries, which can scan whole
   fields, are never generated: `--title` matches whole words (every one of them
   must occur), not substrings.
-- A listing is a single request for at most `--limit` results, sorted newest
-  first: 100 by default, 10 000 at most. Up to twice its `search.pagesize` (50 by
-  default), TheHive answers with one plain search. Beyond that it reads the
-  results through a scroll, in batches of ten, and clears the scroll right after,
-  so a few thousand results cost a stream of small, cheap round trips. Larger
-  sets are to be narrowed down, for example into time windows with
-  `--older-than` and `--newer-than`; `--count` tells how large a set is first.
+- A listing asks for at most `--limit` results, sorted newest first: 100 by
+  default, 10 000 at most. Up to 100 (twice elastic4play's default
+  `search.pagesize`), TheHive answers with one plain search, which walks the
+  matching documents once: with no filters at all that means every case, alert,
+  observable or task of the instance, as on the GUI's search pages, and filters
+  make it cheaper.
+- Beyond 100, TheHive reads the results through a scroll in batches of ten, and
+  in Elasticsearch 5 every batch of a sorted scroll walks the whole match set
+  again. So a larger `--limit` first counts the matches and is served only when
+  at most 10 000 match; otherwise the command stops and asks for narrower
+  filters, for example time windows with `--older-than` and `--newer-than`. A
+  match set of at most 100 still gets one plain search.
 - `--count` fetches a single result without sorting and reads the total from the
   `X-Total` header (elastic4play turns an empty range such as `0-0` into ten
   results, so that is no cheaper).

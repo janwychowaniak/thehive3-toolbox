@@ -469,7 +469,20 @@ def _listing(client: Client, args: argparse.Namespace, path: str, clauses: List[
         else:
             print(total)
         return 0
-    items, total = client.search(path, query, limit=args.limit, sort="-createdAt")
+    limit = args.limit
+    if limit > DEFAULT_LIMIT:
+        # Past DEFAULT_LIMIT elastic4play reads through a scroll in batches of ten,
+        # and in Elasticsearch 5 every batch of a sorted scroll walks the whole set
+        # of matching documents again. Large pages are therefore served only for
+        # match sets of bounded size, counted first.
+        _, total = client.search(path, query, limit=1)
+        if total > MAX_RESULTS:
+            raise ToolboxError(
+                f"{total} {noun} match; more than {DEFAULT_LIMIT} results are listed only when at "
+                f"most {MAX_RESULTS} match. Narrow the filters down (for example into time windows "
+                f"with --newer-than and --older-than) or keep --limit at {DEFAULT_LIMIT} or below.")
+        limit = max(1, min(limit, total))  # a small set still gets one plain search
+    items, total = client.search(path, query, limit=limit, sort="-createdAt")
     cases = _parent_cases(client, items) if with_case else {}
     output.note(f"{len(items)} of {total} {noun}, newest first")
     if args.json:

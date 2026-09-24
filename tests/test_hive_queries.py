@@ -12,21 +12,22 @@ ALLOWED_OPERATORS = {"_and", "_or", "_in", "_field", "_values", "_value", "_lt",
 
 
 class StubClient:
-    def __init__(self, results=None):
+    def __init__(self, results=None, totals=None):
         self.searches = []
         self.results = results or {}  # path -> items returned by a search on it
+        self.totals = totals or {}    # path -> total number of hits, if not len(items)
 
     def search(self, path, query=None, *, limit, sort=None):
         self.searches.append({"path": path, "query": query, "limit": limit, "sort": sort})
         items = self.results.get(path, [])
-        return items, len(items)
+        return items[:limit], self.totals.get(path, len(items))
 
 
-def run(command, *argv, results=None):
+def run(command, *argv, results=None, totals=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--json", action="store_true")
     hive.add_arguments(command, parser)
-    client = StubClient(results)
+    client = StubClient(results, totals)
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         getattr(hive, f"cmd_{command}")(client, parser.parse_args(list(argv)))
     return client.searches
@@ -58,8 +59,8 @@ EVERY_ALERT_FILTER = ["--status", "New", "--tag", "a", "--source", "feed", "--ty
 class QuerySafetyTest(unittest.TestCase):
 
     def test_case_filters_use_cheap_operators_only(self):
-        (search,) = run("cases", *EVERY_CASE_FILTER)
-        self.assertLessEqual(set(operators(search["query"])), ALLOWED_OPERATORS)
+        for search in run("cases", *EVERY_CASE_FILTER):
+            self.assertLessEqual(set(operators(search["query"])), ALLOWED_OPERATORS)
 
     def test_alert_filters_use_cheap_operators_only(self):
         (search,) = run("alerts", *EVERY_ALERT_FILTER)
@@ -97,6 +98,31 @@ class QuerySafetyTest(unittest.TestCase):
         (search,) = run("cases", "--resolution", "TruePositive", "--resolution", "Other")
         self.assertIn({"_in": {"_field": "resolutionStatus", "_values": ["TruePositive", "Other"]}},
                       search["query"]["_and"])
+
+    def test_default_limit_does_not_count_first(self):
+        self.assertEqual(len(run("cases")), 1)
+
+    def test_large_limit_on_a_huge_match_set_is_refused_after_counting(self):
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--json", action="store_true")
+        hive.add_arguments("observables", parser)
+        client = StubClient(totals={"/api/case/artifact/_search": MAX_RESULTS + 1})
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), \
+                self.assertRaises(hive.ToolboxError):
+            hive.cmd_observables(client, parser.parse_args(["--limit", "5000"]))
+        (count,) = client.searches  # the count only: the large listing never ran
+        self.assertEqual((count["limit"], count["sort"]), (1, None))
+
+    def test_large_limit_on_a_bounded_match_set_is_served(self):
+        page = [{"id": f"c{i}"} for i in range(150)]
+        count, listing = run("cases", "--limit", "5000", results={"/api/case/_search": page})
+        self.assertEqual((count["limit"], count["sort"]), (1, None))
+        self.assertEqual((listing["limit"], listing["sort"]), (150, "-createdAt"))
+
+    def test_large_limit_on_a_small_match_set_stays_one_plain_search(self):
+        page = [{"id": f"c{i}"} for i in range(40)]
+        _, listing = run("cases", "--limit", "5000", results={"/api/case/_search": page})
+        self.assertEqual(listing["limit"], 40)
 
     def test_count_asks_for_one_unsorted_result(self):
         (search,) = run("alerts", "--count")
