@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import argparse
+import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
@@ -18,7 +20,7 @@ COMMANDS = [
 ]
 
 
-def cmd_status(client: Client, as_json: bool) -> int:
+def cmd_status(client: Client, args: argparse.Namespace) -> int:
     # Cortex 2 reports no component health (its /api/health is not implemented and
     # answers 501), so a successful /api/status is all there is to check.
     status = client.get("/api/status", auth=False)
@@ -33,7 +35,7 @@ def cmd_status(client: Client, as_json: bool) -> int:
         "libraries": {"elastic4play": versions.get("Elastic4Play"),
                       "elasticsearch_client": versions.get("ElasticSearch client")},
     }
-    if as_json:
+    if args.json:
         output.print_json(data)
     else:
         output.print_fields([
@@ -46,9 +48,9 @@ def cmd_status(client: Client, as_json: bool) -> int:
     return 0
 
 
-def cmd_whoami(client: Client, as_json: bool) -> int:
+def cmd_whoami(client: Client, args: argparse.Namespace) -> int:
     user = _user(client.get("/api/user/current"))
-    if as_json:
+    if args.json:
         output.print_json(user)
     else:
         output.print_fields([
@@ -61,7 +63,7 @@ def cmd_whoami(client: Client, as_json: bool) -> int:
     return 0
 
 
-def cmd_users(client: Client, as_json: bool) -> int:
+def cmd_users(client: Client, args: argparse.Namespace) -> int:
     # What a key may list depends on its user: superadmin sees every organization,
     # orgadmin only its own, anyone else nothing.
     me = client.get("/api/user/current")
@@ -79,7 +81,7 @@ def cmd_users(client: Client, as_json: bool) -> int:
     users = sorted((_user(u) for u in found),
                    key=lambda u: (u["organization"] or "", u["login"] or ""))
     output.note(f"Users of {scope}")
-    if as_json:
+    if args.json:
         output.print_json(users)
     else:
         output.print_table(
@@ -102,42 +104,65 @@ def _user(raw: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def cmd_analyzers(client: Client, as_json: bool) -> int:
-    return _workers(client, as_json, "analyzer")
+def add_arguments(command: str, parser: argparse.ArgumentParser) -> None:
+    if command in ("analyzers", "responders"):
+        parser.add_argument(
+            "--show-config", action="store_true",
+            help="also show each worker's full configuration in clear text, API keys "
+                 "of third-party services included (needs the orgadmin role)")
 
 
-def cmd_responders(client: Client, as_json: bool) -> int:
-    return _workers(client, as_json, "responder")
+def cmd_analyzers(client: Client, args: argparse.Namespace) -> int:
+    return _workers(client, args, "analyzer")
 
 
-def _workers(client: Client, as_json: bool, kind: str) -> int:
+def cmd_responders(client: Client, args: argparse.Namespace) -> int:
+    return _workers(client, args, "responder")
+
+
+def _workers(client: Client, args: argparse.Namespace, kind: str) -> int:
     # Enabled workers are listed per organization, to any user; the catalog of
-    # available definitions needs orgadmin or superadmin. As an orgadmin the
-    # listing also carries each worker's configuration, API keys of third-party
-    # services included; assess_workers() picks its fields explicitly, so none of
-    # it is ever shown.
+    # available definitions needs orgadmin or superadmin. Worker configurations
+    # come along only for the orgadmin role, which a superadmin never holds
+    # (Cortex keeps superadmins alone in the "cortex" organization).
     me = client.get("/api/user/current")
+    roles = me.get("roles", [])
+    if args.show_config and "orgadmin" not in roles:
+        raise ToolboxError(f"--show-config needs the orgadmin role: Cortex returns worker "
+                           f"configurations to no one else; user {me.get('id')} has: "
+                           f"{output.text(roles)}")
     workers = client.get(f"/api/{kind}", params={"range": "all"})
     definitions = None
-    if {"orgadmin", "superadmin"} & set(me.get("roles", [])):
+    if {"orgadmin", "superadmin"} & set(roles):
         definitions = client.get(f"/api/{kind}definition")
-    records = assess_workers(workers, definitions)
+    records = assess_workers(workers, definitions, with_config=args.show_config)
 
     output.note(f"{kind.capitalize()}s enabled in organization {me.get('organization')}: "
                 f"{len(records)}")
     if definitions is None:
         output.note("Checking definitions needs the orgadmin or superadmin role; "
                     "states not checked.")
-    if as_json:
+    if args.json:
         output.print_json(records)
-    else:
-        output.print_table(["NAME", "VERSION", "STATE"],
-                           [[r["name"], r["version"], _state_text(r)] for r in records])
+        return 0
+
+    output.print_table(["NAME", "VERSION", "STATE"],
+                       [[r["name"], r["version"], _state_text(r)] for r in records])
+    if args.show_config:
+        for record in records:
+            print(f"\n{record['name']}")
+            configuration = record["configuration"]
+            if configuration:
+                output.print_fields((f"  {key}", _config_value(value))
+                                    for key, value in sorted(configuration.items()))
+            else:
+                print("  (no configuration)")
     return 0
 
 
 def assess_workers(workers: List[Dict[str, Any]],
-                   definitions: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+                   definitions: Optional[List[Dict[str, Any]]],
+                   with_config: bool = False) -> List[Dict[str, Any]]:
     """Match enabled workers against the catalog of worker definitions.
 
     A worker points to its definition by id, which Cortex builds as
@@ -146,6 +171,9 @@ def assess_workers(workers: List[Dict[str, Any]],
     enabled on the old one pointing to nothing: they stop working until the new
     version is enabled. With definitions=None (catalog not readable) the states
     stay unknown.
+
+    Records are built from explicitly chosen fields, so a worker's configuration,
+    which holds API keys of third-party services, is included only on request.
     """
     newest: Dict[str, Dict[str, Any]] = {}
     for definition in definitions or []:
@@ -165,6 +193,8 @@ def assess_workers(workers: List[Dict[str, Any]],
             "available_version": None,
             "data_types": worker.get("dataTypeList", []),
         }
+        if with_config:
+            record["configuration"] = worker.get("configuration") or {}
         if definitions is not None:
             definition = catalog.get(definition_id)
             if definition is not None:
@@ -200,6 +230,12 @@ def _split_definition_id(definition_id: str,
 
 def _version_key(version: Optional[str]) -> Tuple[int, ...]:
     return tuple(int(n) for n in re.findall(r"\d+", version or ""))
+
+
+def _config_value(value: Any) -> str:
+    """Strings as they are; anything else (numbers, booleans, null, lists, the
+    empty string) as JSON, so that types stay visible."""
+    return value if isinstance(value, str) and value else json.dumps(value, ensure_ascii=False)
 
 
 def _state_text(record: Dict[str, Any]) -> str:

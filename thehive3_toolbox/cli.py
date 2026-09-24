@@ -9,8 +9,9 @@ from . import ToolboxError, __version__, cortex, hive, output
 from .client import Client
 from .config import env_name, load
 
-# Each application module lists its commands in COMMANDS and implements them
-# as cmd_<name>(client, as_json) -> exit status.
+# Each application module lists its commands in COMMANDS and implements them as
+# cmd_<name>(client, args) -> exit status. An optional add_arguments(command,
+# parser) hook adds command-specific options.
 APPS = {
     "hive": (hive, "TheHive 3.x"),
     "cortex": (cortex, "Cortex 2.x"),
@@ -46,9 +47,12 @@ def build_parser() -> argparse.ArgumentParser:
         app_parser = apps.add_parser(app, help=f"commands for {title}",
                                      description=f"Commands for {title}.")
         commands = app_parser.add_subparsers(dest="command", metavar="COMMAND", required=True)
+        add_arguments = getattr(module, "add_arguments", None)
         for name, help_text in module.COMMANDS:
-            commands.add_parser(name, parents=[common], help=help_text,
-                                description=help_text[0].upper() + help_text[1:] + ".")
+            command = commands.add_parser(name, parents=[common], help=help_text,
+                                          description=help_text[0].upper() + help_text[1:] + ".")
+            if add_arguments:
+                add_arguments(name, command)
     return parser
 
 
@@ -60,7 +64,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if config.verify is False and config.url.startswith("https://"):
             output.note(f"th3tb: warning: TLS certificate verification is disabled "
                         f"({env_name(args.app, 'VERIFY')})")
-        return getattr(module, f"cmd_{args.command}")(Client(config), args.json)
+        return getattr(module, f"cmd_{args.command}")(Client(config), args)
     except ToolboxError as exc:
         output.note(f"th3tb: error: {exc}")
         return 2

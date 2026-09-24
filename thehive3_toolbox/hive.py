@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 from typing import Any, Dict
 
 from . import output
@@ -24,7 +25,7 @@ def _level(value: Any) -> str:
     return value if value in _LEVELS else "WARNING"
 
 
-def cmd_status(client: Client, as_json: bool) -> int:
+def cmd_status(client: Client, args: argparse.Namespace) -> int:
     # Deliberately not /api/health: it never answers "Ok" once any connector is
     # configured (its list of statuses is not deduplicated), so the level is
     # derived from the components instead.
@@ -60,7 +61,7 @@ def cmd_status(client: Client, as_json: bool) -> int:
         "libraries": {"elastic4play": versions.get("Elastic4Play"),
                       "elasticsearch_client": versions.get("ElasticSearch")},
     }
-    if as_json:
+    if args.json:
         output.print_json(data)
         return _EXIT[level]
 
@@ -83,9 +84,9 @@ def cmd_status(client: Client, as_json: bool) -> int:
     return _EXIT[level]
 
 
-def cmd_whoami(client: Client, as_json: bool) -> int:
+def cmd_whoami(client: Client, args: argparse.Namespace) -> int:
     user = _user(client.get("/api/user/current"))
-    if as_json:
+    if args.json:
         output.print_json(user)
     else:
         output.print_fields([
@@ -97,12 +98,12 @@ def cmd_whoami(client: Client, as_json: bool) -> int:
     return 0
 
 
-def cmd_users(client: Client, as_json: bool) -> int:
+def cmd_users(client: Client, args: argparse.Namespace) -> int:
     # Any user with the read role may list all users. The list is small, so it is
     # fetched in one go (range=all).
     found = client.post("/api/user/_search", {}, params={"range": "all"})
     users = sorted((_user(u) for u in found), key=lambda u: u["login"] or "")
-    if as_json:
+    if args.json:
         output.print_json(users)
     else:
         output.print_table(

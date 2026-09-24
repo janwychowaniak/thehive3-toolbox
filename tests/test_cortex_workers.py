@@ -57,9 +57,14 @@ class AssessWorkersTest(unittest.TestCase):
         r = assess_one(worker("Lookup_2_0", "2.0"), None)
         self.assertEqual((r["state"], r["version"]), (None, "2.0"))
 
-    def test_configuration_never_reaches_the_record(self):
+    def test_configuration_left_out_by_default(self):
         r = assess_one(worker("Lookup_2_0", "2.0"), [definition("Lookup", "2.0")])
         self.assertNotIn("must-not-leak", repr(r))
+
+    def test_configuration_included_on_request(self):
+        (r,) = assess_workers([worker("Lookup_2_0", "2.0")], [definition("Lookup", "2.0")],
+                              with_config=True)
+        self.assertEqual(r["configuration"], {"key": "must-not-leak"})
 
     def test_records_sorted_by_name(self):
         records = assess_workers([worker("B_1_0"), worker("A_1_0")], [])

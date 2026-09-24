@@ -73,7 +73,8 @@ but `*_VERIFY` takes precedence.
 
 ```
 th3tb hive   status | whoami | users  [--json]
-th3tb cortex status | whoami | users | analyzers | responders  [--json]
+th3tb cortex status | whoami | users  [--json]
+th3tb cortex analyzers | responders  [--show-config] [--json]
 ```
 
 | Command  | What it shows | Needs |
@@ -81,7 +82,7 @@ th3tb cortex status | whoami | users | analyzers | responders  [--json]
 | `status` | version, health of the components, authentication methods | no API key |
 | `whoami` | the user behind the configured API key and its roles | any valid key |
 | `users`  | users with their roles, status and whether they have an API key | TheHive: any valid key; Cortex: `orgadmin` (own organization) or `superadmin` (all organizations) |
-| `analyzers`, `responders` | Cortex only: workers enabled in the key's organization and the state of their definitions | any valid key; checking definitions needs `orgadmin` or `superadmin` |
+| `analyzers`, `responders` | Cortex only: workers enabled in the key's organization and the state of their definitions; with `--show-config` also their full configuration | any valid key; checking definitions needs `orgadmin` or `superadmin`; `--show-config` needs `orgadmin` |
 
 ```
 $ th3tb hive status
@@ -125,8 +126,28 @@ Cortex, a key without a password usually marks an integration account.
 definitions Cortex currently knows. Updating that catalog usually replaces a
 definition with a newer version, and workers still enabled on the old one stop
 working: they show up as `definition missing`, together with the version to
-enable instead. Worker configurations (which hold API keys of third-party
-services) are never shown.
+enable instead.
+
+With `--show-config` they also print each worker's full configuration: every
+value Cortex passes to the worker when it runs, including the TLP/PAP limits,
+proxies and, in clear text, the API keys of third-party services. Values other
+than plain strings are shown as JSON, so `true`, `null` and `""` stay
+distinguishable. Cortex returns configurations only to users with the
+`orgadmin` role, which a superadmin never holds, so the option needs such a key.
+Without it, configurations are left out.
+
+```
+$ th3tb cortex analyzers --show-config
+Analyzers enabled in organization lab: 1
+NAME       VERSION  STATE
+GeoIp_2_0  2.0      ok
+
+GeoIp_2_0
+  check_tlp   true
+  key         <api-key>
+  max_tlp     2
+  proxy_http  null
+```
 
 ### Exit status
 
