@@ -20,6 +20,8 @@ COMMANDS = [
     ("case", "one case with its custom fields, tasks and observables"),
     ("alerts", "alerts matching the filters, newest first"),
     ("alert", "one alert with its observables"),
+    ("observables", "observables of all cases matching the filters, newest first, with their case"),
+    ("tasks", "tasks of all cases matching the filters, newest first, with their case"),
     ("templates", "case templates and what they preset"),
     ("custom-fields", "definitions of custom fields"),
     ("data-types", "observable data types, the default ones told from those added locally"),
@@ -266,6 +268,7 @@ def _clean(entity: Dict[str, Any]) -> Dict[str, Any]:
 
 CASE_STATUSES = ["Open", "Resolved", "Deleted"]
 ALERT_STATUSES = ["New", "Updated", "Ignored", "Imported"]
+TASK_STATUSES = ["Waiting", "InProgress", "Completed", "Cancel"]
 RESOLUTIONS = ["TruePositive", "FalsePositive", "Indeterminate", "Other", "Duplicated"]
 DEFAULT_LIMIT = 100  # up to here elastic4play answers with one plain search
 DETAIL_CAP = 1000  # tasks or observables shown for one case
@@ -274,33 +277,45 @@ _AGE_DAYS = {"d": 1, "w": 7, "y": 365}
 
 
 def add_arguments(command: str, parser: argparse.ArgumentParser) -> None:
-    if command in ("cases", "alerts"):
-        parser.add_argument(
-            "--status", action="append", choices=CASE_STATUSES if command == "cases" else ALERT_STATUSES,
-            help="only this status (repeatable)"
-                 + ("; by default Deleted cases are left out" if command == "cases" else ""))
-        parser.add_argument("--tag", action="append", help="only with this tag (repeatable: all must match)")
-        if command == "cases":
-            parser.add_argument("--resolution", action="append", choices=RESOLUTIONS,
-                                help="only resolved cases with this resolution (repeatable)")
-            parser.add_argument("--owner", metavar="LOGIN", help="only cases owned by this user")
-        else:
-            parser.add_argument("--source", help="only alerts from this source")
-            parser.add_argument("--type", help="only alerts of this type")
-        parser.add_argument("--older-than", type=_cutoff, metavar="AGE",
-                            help="created before: 30d, 12w, 2y or a date YYYY-MM-DD")
-        parser.add_argument("--newer-than", type=_cutoff, metavar="AGE",
-                            help="created after: 30d, 12w, 2y or a date YYYY-MM-DD")
-        parser.add_argument("--title", metavar="WORDS", help="every word must occur in the title")
-        parser.add_argument("--limit", type=_limit, default=DEFAULT_LIMIT,
-                            help=f"how many to show, newest first (default {DEFAULT_LIMIT}, "
-                                 f"at most {MAX_RESULTS})")
-        parser.add_argument("--count", action="store_true", help="only print how many match")
+    if command == "cases":
+        parser.add_argument("--status", action="append", choices=CASE_STATUSES,
+                            help="only this status (repeatable); by default Deleted cases are left out")
+        parser.add_argument("--resolution", action="append", choices=RESOLUTIONS,
+                            help="only resolved cases with this resolution (repeatable)")
+        parser.add_argument("--owner", metavar="LOGIN", help="only cases owned by this user")
+    elif command == "alerts":
+        parser.add_argument("--status", action="append", choices=ALERT_STATUSES,
+                            help="only this status (repeatable)")
+        parser.add_argument("--source", help="only alerts from this source")
+        parser.add_argument("--type", help="only alerts of this type")
+    elif command == "observables":
+        parser.add_argument("--value", help="only this exact value; for files, a hash of the file")
+        parser.add_argument("--type", metavar="DATA_TYPE", help="only this data type")
+        parser.add_argument("--ioc", action="store_true", help="only observables flagged as IOC")
+    elif command == "tasks":
+        parser.add_argument("--status", action="append", choices=TASK_STATUSES,
+                            help="only this status (repeatable); by default Waiting and InProgress")
+        parser.add_argument("--owner", metavar="LOGIN", help="only tasks assigned to this user")
     elif command == "case":
         parser.add_argument("ref", metavar="NUMBER|ID",
                             help="case number as shown in the GUI (with or without #), or case id")
     elif command == "alert":
         parser.add_argument("alert_id", metavar="ID", help="alert id, as listed by alerts")
+
+    if command in ("cases", "alerts", "observables", "tasks"):
+        if command != "tasks":
+            parser.add_argument("--tag", action="append",
+                                help="only with this tag (repeatable: all must match)")
+        if command != "observables":
+            parser.add_argument("--title", metavar="WORDS", help="every word must occur in the title")
+        parser.add_argument("--older-than", type=_cutoff, metavar="AGE",
+                            help="created before: 30d, 12w, 2y or a date YYYY-MM-DD")
+        parser.add_argument("--newer-than", type=_cutoff, metavar="AGE",
+                            help="created after: 30d, 12w, 2y or a date YYYY-MM-DD")
+        parser.add_argument("--limit", type=_limit, default=DEFAULT_LIMIT,
+                            help=f"how many to show, newest first (default {DEFAULT_LIMIT}, "
+                                 f"at most {MAX_RESULTS})")
+        parser.add_argument("--count", action="store_true", help="only print how many match")
 
 
 def cmd_cases(client: Client, args: argparse.Namespace) -> int:
@@ -311,7 +326,7 @@ def cmd_cases(client: Client, args: argparse.Namespace) -> int:
         clauses.append({"owner": args.owner})
     return _listing(client, args, "/api/case/_search", clauses, "cases",
                     ["NUMBER", "CREATED", "STATUS", "SEVERITY", "TLP", "OWNER", "TITLE"],
-                    lambda c: [f"#{c.get('caseId')}", _when(c.get("createdAt")), _case_status(c),
+                    lambda c, _: [f"#{c.get('caseId')}", _when(c.get("createdAt")), _case_status(c),
                                _SEVERITY.get(c.get("severity"), c.get("severity")),
                                _TLP.get(c.get("tlp"), c.get("tlp")), c.get("owner"), c.get("title")])
 
@@ -325,9 +340,36 @@ def cmd_alerts(client: Client, args: argparse.Namespace) -> int:
             clauses.append({field: getattr(args, field)})
     return _listing(client, args, "/api/alert/_search", clauses, "alerts",
                     ["ID", "CREATED", "STATUS", "SEVERITY", "SOURCE", "TYPE", "SOURCE REF", "TITLE"],
-                    lambda a: [a.get("id"), _when(a.get("createdAt")), a.get("status"),
+                    lambda a, _: [a.get("id"), _when(a.get("createdAt")), a.get("status"),
                                _SEVERITY.get(a.get("severity"), a.get("severity")), a.get("source"),
                                a.get("type"), a.get("sourceRef"), a.get("title")])
+
+
+def cmd_observables(client: Client, args: argparse.Namespace) -> int:
+    # Deleted observables stay in the index with status Deleted; the GUI hides them.
+    clauses = [{"status": "Ok"}] + _filters(args)
+    if args.value:
+        clauses.append({"_or": [{"data": args.value}, {"attachment.hashes": args.value}]})
+    if args.type:
+        clauses.append({"dataType": args.type})
+    if args.ioc:
+        clauses.append({"ioc": True})
+    return _listing(client, args, "/api/case/artifact/_search", clauses, "observables",
+                    ["CREATED", "TYPE", "VALUE", "IOC", "CASE", "CASE TITLE"],
+                    lambda o, case: [_when(o.get("createdAt")), o.get("dataType"), _observable_value(o),
+                                     bool(o.get("ioc")), _case_number(case, o), (case or {}).get("title")],
+                    with_case=True)
+
+
+def cmd_tasks(client: Client, args: argparse.Namespace) -> int:
+    clauses = [_in("status", args.status or ["Waiting", "InProgress"])] + _filters(args)
+    if args.owner:
+        clauses.append({"owner": args.owner})
+    return _listing(client, args, "/api/case/task/_search", clauses, "tasks",
+                    ["CREATED", "STATUS", "OWNER", "TASK", "CASE", "CASE TITLE"],
+                    lambda t, case: [_when(t.get("createdAt")), t.get("status"), t.get("owner"),
+                                     t.get("title"), _case_number(case, t), (case or {}).get("title")],
+                    with_case=True)
 
 
 def cmd_case(client: Client, args: argparse.Namespace) -> int:
@@ -413,7 +455,11 @@ def cmd_alert(client: Client, args: argparse.Namespace) -> int:
 
 
 def _listing(client: Client, args: argparse.Namespace, path: str, clauses: List[Dict[str, Any]],
-             noun: str, headers: List[str], row: Callable[[Dict[str, Any]], List[Any]]) -> int:
+             noun: str, headers: List[str],
+             row: Callable[[Dict[str, Any], Optional[Dict[str, Any]]], List[Any]],
+             with_case: bool = False) -> int:
+    """List one page of results; with_case also looks up, in a single search, the
+    cases the listed tasks or observables belong to."""
     query = {"_and": clauses} if clauses else None
     if args.count:
         # One result and no sorting: the total comes from the X-Total header.
@@ -424,22 +470,50 @@ def _listing(client: Client, args: argparse.Namespace, path: str, clauses: List[
             print(total)
         return 0
     items, total = client.search(path, query, limit=args.limit, sort="-createdAt")
+    cases = _parent_cases(client, items) if with_case else {}
     output.note(f"{len(items)} of {total} {noun}, newest first")
     if args.json:
-        output.print_json([_no_meta(i) for i in items])
+        output.print_json([dict(_no_meta(i), case=_case_summary(cases.get(i.get("_parent")), i))
+                           if with_case else _no_meta(i) for i in items])
     else:
-        output.print_table(headers, [row(i) for i in items])
+        output.print_table(headers, [row(i, cases.get(i.get("_parent"))) for i in items])
     return 0
 
 
+def _parent_cases(client: Client, items: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """The cases of listed tasks or observables, fetched with one ids query."""
+    ids = sorted({i["_parent"] for i in items if i.get("_parent")})
+    if not ids:
+        return {}
+    found, _ = client.search("/api/case/_search", _in("_id", ids), limit=len(ids))
+    return {c["id"]: c for c in found}
+
+
+def _case_number(case: Optional[Dict[str, Any]], child: Dict[str, Any]) -> str:
+    if case is None:
+        # A task or observable whose case is gone altogether (not just soft-deleted).
+        return f"{child.get('_parent')} (missing)"
+    deleted = " (Deleted)" if case.get("status") == "Deleted" else ""
+    return f"#{case.get('caseId')}{deleted}"
+
+
+def _case_summary(case: Optional[Dict[str, Any]], child: Dict[str, Any]) -> Dict[str, Any]:
+    if case is None:
+        return {"id": child.get("_parent"), "missing": True}
+    return {"id": case.get("id"), "number": case.get("caseId"), "title": case.get("title"),
+            "status": case.get("status")}
+
+
 def _filters(args: argparse.Namespace) -> List[Dict[str, Any]]:
-    clauses: List[Dict[str, Any]] = [{"tags": tag} for tag in args.tag or []]
+    """Clauses of the options every listing shares (tags and title where offered)."""
+    clauses: List[Dict[str, Any]] = [{"tags": tag} for tag in getattr(args, "tag", None) or []]
     if args.older_than is not None:
         clauses.append({"_lt": {"createdAt": args.older_than}})
     if args.newer_than is not None:
         clauses.append({"_gt": {"createdAt": args.newer_than}})
     # One match clause per word, so that all of them must occur.
-    clauses += [{"_like": {"_field": "title", "_value": word}} for word in (args.title or "").split()]
+    title = getattr(args, "title", None) or ""
+    clauses += [{"_like": {"_field": "title", "_value": word}} for word in title.split()]
     return clauses
 
 

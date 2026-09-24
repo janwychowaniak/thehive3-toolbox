@@ -73,7 +73,7 @@ but `*_VERIFY` takes precedence.
 
 ```
 th3tb hive   status | whoami | users  [--json]
-th3tb hive   cases | alerts  [filters] [--limit N] [--count] [--json]
+th3tb hive   cases | alerts | observables | tasks  [filters] [--limit N] [--count] [--json]
 th3tb hive   case NUMBER|ID  [--json]
 th3tb hive   alert ID  [--json]
 th3tb hive   templates | custom-fields | data-types | report-templates  [--json]
@@ -91,6 +91,8 @@ th3tb cortex analyzers | responders  [--show-config] [--json]
 | `case` | TheHive only: one case, by its number (as in the GUI) or id, with custom fields, metrics, tasks and observables | any valid key |
 | `alerts` | TheHive only: alerts matching `--status`, `--tag`, `--source`, `--type`, `--older-than`, `--newer-than` and `--title`, newest first | any valid key |
 | `alert` | TheHive only: one alert, by id, with its observables and linked case | any valid key |
+| `observables` | TheHive only: observables of all cases matching `--value` (exact; for files, a hash of the file), `--type`, `--ioc`, `--tag`, `--older-than` and `--newer-than`, newest first, with their case | any valid key |
+| `tasks` | TheHive only: tasks of all cases matching `--status` (Waiting and InProgress by default), `--owner`, `--title`, `--older-than` and `--newer-than`, newest first, with their case | any valid key |
 | `templates` | TheHive only: case templates and what they preset (severity, TLP, PAP, tasks, custom fields, metrics) | any valid key |
 | `custom-fields` | TheHive only: definitions of custom fields | any valid key |
 | `data-types` | TheHive only: observable data types, the defaults told from those added locally | any valid key |
@@ -121,6 +123,13 @@ NUMBER  CREATED           STATUS                   SEVERITY  TLP    OWNER  TITLE
 #40211  2025-06-30 14:02  Resolved: FalsePositive  medium    AMBER  alice  Suspicious invoice from example.com
 #40187  2025-06-29 09:41  Open                     high      AMBER  bob    Credential phishing wave
 #40102  2025-06-27 17:15  Resolved: TruePositive   medium    GREEN  alice  Reported mail with a link to 192.0.2.10
+
+$ th3tb hive observables --value 192.0.2.44
+3 of 3 observables, newest first
+CREATED           TYPE  VALUE       IOC  CASE              CASE TITLE
+2025-06-30 14:05  ip    192.0.2.44  yes  #40211            Suspicious invoice from example.com
+2025-05-12 08:20  ip    192.0.2.44  no   #39870            Outbound traffic to a rare host
+2024-11-03 21:47  ip    192.0.2.44  no   #35102 (Deleted)  Scanner noise
 
 $ th3tb hive templates
 NAME      TITLE PREFIX  SEVERITY  TLP    PAP    TASKS  CUSTOM FIELDS  METRICS
@@ -187,7 +196,7 @@ GeoIp_2_0
   proxy_http  null
 ```
 
-### Cases and alerts on large instances
+### Searching large instances
 
 These commands query the same Elasticsearch the instance runs on, so they are
 built to stay cheap even on indices holding millions of cases:
@@ -206,12 +215,18 @@ built to stay cheap even on indices holding millions of cases:
 - `--count` fetches a single result without sorting and reads the total from the
   `X-Total` header (elastic4play turns an empty range such as `0-0` into ten
   results, so that is no cheaper).
-- A listing makes no follow-up request per result. Only `case` fetches tasks and
+- A listing makes no follow-up request per result. `observables` and `tasks` add
+  one ids query for the cases of the whole page. Only `case` fetches tasks and
   observables, the same queries the GUI makes when opening a case: a plain search
   for up to 100 of each, and a larger one only for cases that have more, up to
   1000.
 - Cases with status `Deleted` (TheHive's soft delete, hidden in the GUI) are left
   out unless asked for with `--status Deleted`; deleted observables never show.
+  Observables and tasks of a soft-deleted case are listed with `(Deleted)` next to
+  its number, and those whose case is gone altogether with `(missing)`.
+- `--value` is an exact, case-sensitive match on the observable's value, or on
+  any hash TheHive keeps for a file observable (SHA-256, SHA-1 and MD5 by
+  default). Observables inside alerts are not searched.
 
 Ages are given as `30d`, `12w`, `2y` or a date `YYYY-MM-DD`, and apply to the
 creation time. Times are shown and dates read in local time.
