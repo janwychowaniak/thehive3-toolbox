@@ -4,7 +4,7 @@ import io
 import unittest
 
 from thehive3_toolbox import hive
-from thehive3_toolbox.client import MAX_PAGE
+from thehive3_toolbox.client import MAX_RESULTS
 
 # Operators that resolve through the inverted index (term, terms, range, match).
 ALLOWED_OPERATORS = {"_and", "_in", "_field", "_values", "_value", "_lt", "_gt", "_like"}
@@ -14,7 +14,7 @@ class StubClient:
     def __init__(self):
         self.searches = []
 
-    def search(self, path, query=None, *, limit, offset=0, sort=None):
+    def search(self, path, query=None, *, limit, sort=None):
         self.searches.append({"path": path, "query": query, "limit": limit, "sort": sort})
         return [], 0
 
@@ -40,9 +40,10 @@ def operators(query):
             yield from operators(item)
 
 
-EVERY_CASE_FILTER = ["--status", "Open", "--tag", "a", "--tag", "b", "--owner", "alice",
+EVERY_CASE_FILTER = ["--status", "Resolved", "--resolution", "FalsePositive", "--tag", "a",
+                     "--tag", "b", "--owner", "alice",
                      "--older-than", "2y", "--newer-than", "2020-01-31", "--title", "two words",
-                     "--limit", "100"]
+                     "--limit", "10000"]
 EVERY_ALERT_FILTER = ["--status", "New", "--tag", "a", "--source", "feed", "--type", "external",
                       "--older-than", "12w", "--newer-than", "30d", "--title", "word"]
 
@@ -62,9 +63,14 @@ class QuerySafetyTest(unittest.TestCase):
         likes = [c["_like"]["_value"] for c in search["query"]["_and"] if "_like" in c]
         self.assertEqual(likes, ["two", "words"])
 
-    def test_listing_is_one_page_within_bounds_newest_first(self):
+    def test_listing_defaults_to_one_plain_search_newest_first(self):
         (search,) = run("cases")
-        self.assertEqual((search["limit"], search["sort"]), (50, "-createdAt"))
+        self.assertEqual((search["limit"], search["sort"]), (100, "-createdAt"))
+
+    def test_resolution_filter(self):
+        (search,) = run("cases", "--resolution", "TruePositive", "--resolution", "Other")
+        self.assertIn({"_in": {"_field": "resolutionStatus", "_values": ["TruePositive", "Other"]}},
+                      search["query"]["_and"])
 
     def test_count_asks_for_one_unsorted_result(self):
         (search,) = run("alerts", "--count")
@@ -75,9 +81,9 @@ class QuerySafetyTest(unittest.TestCase):
         self.assertIn({"_in": {"_field": "status", "_values": ["Open", "Resolved"]}},
                       search["query"]["_and"])
 
-    def test_limit_above_one_page_is_refused(self):
+    def test_limit_above_the_cap_is_refused(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            run("cases", "--limit", str(MAX_PAGE + 1))
+            run("cases", "--limit", str(MAX_RESULTS + 1))
 
     def test_unknown_age_format_is_refused(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):

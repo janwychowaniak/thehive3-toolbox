@@ -12,10 +12,10 @@ from . import ToolboxError, __version__
 from .config import AppConfig, ConfigError, env_name
 
 TIMEOUT = 30  # seconds, per request
-# elastic4play serves a search as one plain Elasticsearch query up to twice its
-# search.pagesize (50 by default); anything larger switches to a scroll, which
-# holds a context open on the cluster. One page is kept within that bound.
-MAX_PAGE = 100
+# Upper bound on the results of one search: Elasticsearch's default
+# index.max_result_window, as far as plain paging could reach anyway. Larger sets
+# are to be narrowed down with filters.
+MAX_RESULTS = 10000
 
 
 class ApiError(ToolboxError):
@@ -41,16 +41,20 @@ class Client:
     def post(self, path: str, body: Any, *, params: Optional[dict] = None) -> Any:
         return self._request("POST", path, auth=True, params=params, body=body)
 
-    def search(self, path: str, query: Optional[dict] = None, *, limit: int, offset: int = 0,
+    def search(self, path: str, query: Optional[dict] = None, *, limit: int,
                sort: Optional[str] = None) -> Tuple[List[Any], int]:
-        """One page of an elastic4play search and the total number of hits.
+        """The first `limit` results of an elastic4play search and the total number
+        of hits.
 
         elastic4play reads the page as range=<from>-<to>; note that it turns an
-        empty range such as 0-0 into its default of 10 results.
+        empty range such as 0-0 into its default of 10 results. Up to twice its
+        search.pagesize (50 by default) it runs one plain Elasticsearch search;
+        beyond that it reads the results through a scroll, in batches of ten,
+        and clears the scroll when done.
         """
-        if not 1 <= limit <= MAX_PAGE:
-            raise ValueError(f"page size {limit} out of 1..{MAX_PAGE}")
-        params = {"range": f"{offset}-{offset + limit}"}
+        if not 1 <= limit <= MAX_RESULTS:
+            raise ValueError(f"limit {limit} out of 1..{MAX_RESULTS}")
+        params = {"range": f"0-{limit}"}
         if sort:
             params["sort"] = sort
         resp = self._send("POST", path, auth=True, params=params,

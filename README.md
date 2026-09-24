@@ -87,7 +87,7 @@ th3tb cortex analyzers | responders  [--show-config] [--json]
 | `status` | version, health of the components, authentication methods | no API key |
 | `whoami` | the user behind the configured API key and its roles | any valid key |
 | `users`  | users with their roles, status and whether they have an API key | TheHive: any valid key; Cortex: `orgadmin` (own organization) or `superadmin` (all organizations) |
-| `cases` | TheHive only: cases matching `--status`, `--tag`, `--owner`, `--older-than`, `--newer-than` and `--title`, newest first | any valid key |
+| `cases` | TheHive only: cases matching `--status`, `--resolution`, `--tag`, `--owner`, `--older-than`, `--newer-than` and `--title`, newest first | any valid key |
 | `case` | TheHive only: one case, by its number (as in the GUI) or id, with custom fields, metrics, tasks and observables | any valid key |
 | `alerts` | TheHive only: alerts matching `--status`, `--tag`, `--source`, `--type`, `--older-than`, `--newer-than` and `--title`, newest first | any valid key |
 | `alert` | TheHive only: one alert, by id, with its observables and linked case | any valid key |
@@ -196,20 +196,30 @@ built to stay cheap even on indices holding millions of cases:
   the inverted index. Wildcard and `query_string` queries, which can scan whole
   fields, are never generated: `--title` matches whole words (every one of them
   must occur), not substrings.
-- A listing is one plain search for at most 100 results (`--limit`, 50 by
-  default), sorted newest first. Beyond twice its `search.pagesize` (50 by
-  default) TheHive switches to a scroll, which holds a context open on the
-  cluster; the limit keeps every listing below that.
+- A listing is a single request for at most `--limit` results, sorted newest
+  first: 100 by default, 10 000 at most. Up to twice its `search.pagesize` (50 by
+  default), TheHive answers with one plain search. Beyond that it reads the
+  results through a scroll, in batches of ten, and clears the scroll right after,
+  so a few thousand results cost a stream of small, cheap round trips. Larger
+  sets are to be narrowed down, for example into time windows with
+  `--older-than` and `--newer-than`; `--count` tells how large a set is first.
 - `--count` fetches a single result without sorting and reads the total from the
-  `X-Total` header.
+  `X-Total` header (elastic4play turns an empty range such as `0-0` into ten
+  results, so that is no cheaper).
 - A listing makes no follow-up request per result. Only `case` fetches tasks and
-  observables, the same queries the GUI makes when opening a case, in pages of
-  100 and up to 1000 of each.
+  observables, the same queries the GUI makes when opening a case: a plain search
+  for up to 100 of each, and a larger one only for cases that have more, up to
+  1000.
 - Cases with status `Deleted` (TheHive's soft delete, hidden in the GUI) are left
   out unless asked for with `--status Deleted`; deleted observables never show.
 
 Ages are given as `30d`, `12w`, `2y` or a date `YYYY-MM-DD`, and apply to the
 creation time. Times are shown and dates read in local time.
+
+The resolution of a resolved case (`TruePositive`, `FalsePositive`,
+`Indeterminate`, `Other`, `Duplicated`) shows in the STATUS column and can be
+filtered on with `--resolution`. Its impact (`impactStatus`) is in the `--json`
+output.
 
 ### Comparing and backing up TheHive configuration
 

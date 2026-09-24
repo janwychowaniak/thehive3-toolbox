@@ -10,7 +10,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 from . import ToolboxError, output
-from .client import MAX_PAGE, ApiError, Client
+from .client import MAX_RESULTS, ApiError, Client
 
 COMMANDS = [
     ("status", "version and health of TheHive and its connectors (no API key needed)"),
@@ -261,12 +261,14 @@ def _clean(entity: Dict[str, Any]) -> Dict[str, Any]:
 #
 # Every query here is built from term, terms, range and match clauses only: all
 # of them resolve through the inverted index. Wildcard and query_string clauses,
-# which can scan whole fields of a large index, are never generated. Listings are
-# one plain search of at most MAX_PAGE results; --count asks for a single one.
+# which can scan whole fields of a large index, are never generated. A listing is
+# one search of at most MAX_RESULTS results; --count asks for a single one.
 
 CASE_STATUSES = ["Open", "Resolved", "Deleted"]
 ALERT_STATUSES = ["New", "Updated", "Ignored", "Imported"]
-DETAIL_CAP = 1000  # tasks or observables shown for one case, fetched MAX_PAGE at a time
+RESOLUTIONS = ["TruePositive", "FalsePositive", "Indeterminate", "Other", "Duplicated"]
+DEFAULT_LIMIT = 100  # up to here elastic4play answers with one plain search
+DETAIL_CAP = 1000  # tasks or observables shown for one case
 _AGE = re.compile(r"(\d+)([dwy])")
 _AGE_DAYS = {"d": 1, "w": 7, "y": 365}
 
@@ -279,6 +281,8 @@ def add_arguments(command: str, parser: argparse.ArgumentParser) -> None:
                  + ("; by default Deleted cases are left out" if command == "cases" else ""))
         parser.add_argument("--tag", action="append", help="only with this tag (repeatable: all must match)")
         if command == "cases":
+            parser.add_argument("--resolution", action="append", choices=RESOLUTIONS,
+                                help="only resolved cases with this resolution (repeatable)")
             parser.add_argument("--owner", metavar="LOGIN", help="only cases owned by this user")
         else:
             parser.add_argument("--source", help="only alerts from this source")
@@ -288,8 +292,9 @@ def add_arguments(command: str, parser: argparse.ArgumentParser) -> None:
         parser.add_argument("--newer-than", type=_cutoff, metavar="AGE",
                             help="created after: 30d, 12w, 2y or a date YYYY-MM-DD")
         parser.add_argument("--title", metavar="WORDS", help="every word must occur in the title")
-        parser.add_argument("--limit", type=_limit, default=50,
-                            help=f"how many to show, newest first (default 50, at most {MAX_PAGE})")
+        parser.add_argument("--limit", type=_limit, default=DEFAULT_LIMIT,
+                            help=f"how many to show, newest first (default {DEFAULT_LIMIT}, "
+                                 f"at most {MAX_RESULTS})")
         parser.add_argument("--count", action="store_true", help="only print how many match")
     elif command == "case":
         parser.add_argument("ref", metavar="NUMBER|ID",
@@ -300,6 +305,8 @@ def add_arguments(command: str, parser: argparse.ArgumentParser) -> None:
 
 def cmd_cases(client: Client, args: argparse.Namespace) -> int:
     clauses = [_in("status", args.status or ["Open", "Resolved"])] + _filters(args)
+    if args.resolution:
+        clauses.append(_in("resolutionStatus", args.resolution))
     if args.owner:
         clauses.append({"owner": args.owner})
     return _listing(client, args, "/api/case/_search", clauses, "cases",
@@ -464,14 +471,12 @@ def _get_or_none(client: Client, path: str) -> Optional[Dict[str, Any]]:
 
 def _fetch_all(client: Client, path: str,
                query: Optional[Dict[str, Any]] = None) -> Tuple[List[Dict[str, Any]], int]:
-    """Up to DETAIL_CAP children of one case, in plain searches of MAX_PAGE."""
-    items, total = client.search(path, query, limit=MAX_PAGE, sort="+createdAt")
-    while len(items) < min(total, DETAIL_CAP):
-        more, _ = client.search(path, query, limit=MAX_PAGE, offset=len(items), sort="+createdAt")
-        if not more:
-            break
-        items += more
-    return items[:DETAIL_CAP], total
+    """Up to DETAIL_CAP children of one case: a plain search, and a larger one
+    (read through a scroll) only when the case has more."""
+    items, total = client.search(path, query, limit=DEFAULT_LIMIT)
+    if total > len(items):
+        items, total = client.search(path, query, limit=min(total, DETAIL_CAP))
+    return items, total
 
 
 def _case_status(case: Dict[str, Any]) -> str:
@@ -525,7 +530,7 @@ def _limit(value: str) -> int:
         limit = int(value)
     except ValueError:
         limit = 0
-    if not 1 <= limit <= MAX_PAGE:
+    if not 1 <= limit <= MAX_RESULTS:
         raise argparse.ArgumentTypeError(
-            f"expected 1 to {MAX_PAGE} (larger pages would make TheHive open a scroll), got {value!r}")
+            f"expected 1 to {MAX_RESULTS} (narrow larger sets down with filters), got {value!r}")
     return limit
