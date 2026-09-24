@@ -73,6 +73,9 @@ but `*_VERIFY` takes precedence.
 
 ```
 th3tb hive   status | whoami | users  [--json]
+th3tb hive   cases | alerts  [filters] [--limit N] [--count] [--json]
+th3tb hive   case NUMBER|ID  [--json]
+th3tb hive   alert ID  [--json]
 th3tb hive   templates | custom-fields | data-types | report-templates  [--json]
 th3tb hive   export
 th3tb cortex status | whoami | users  [--json]
@@ -84,6 +87,10 @@ th3tb cortex analyzers | responders  [--show-config] [--json]
 | `status` | version, health of the components, authentication methods | no API key |
 | `whoami` | the user behind the configured API key and its roles | any valid key |
 | `users`  | users with their roles, status and whether they have an API key | TheHive: any valid key; Cortex: `orgadmin` (own organization) or `superadmin` (all organizations) |
+| `cases` | TheHive only: cases matching `--status`, `--tag`, `--owner`, `--older-than`, `--newer-than` and `--title`, newest first | any valid key |
+| `case` | TheHive only: one case, by its number (as in the GUI) or id, with custom fields, metrics, tasks and observables | any valid key |
+| `alerts` | TheHive only: alerts matching `--status`, `--tag`, `--source`, `--type`, `--older-than`, `--newer-than` and `--title`, newest first | any valid key |
+| `alert` | TheHive only: one alert, by id, with its observables and linked case | any valid key |
 | `templates` | TheHive only: case templates and what they preset (severity, TLP, PAP, tasks, custom fields, metrics) | any valid key |
 | `custom-fields` | TheHive only: definitions of custom fields | any valid key |
 | `data-types` | TheHive only: observable data types, the defaults told from those added locally | any valid key |
@@ -107,6 +114,13 @@ LOGIN       NAME           ROLES               STATUS  API KEY
 alice       Alice Example  read, write, admin  Ok      no
 bob         Bob Example    read, write         Locked  no
 svc-alerts  Alert feed     read, write, alert  Ok      yes
+
+$ th3tb hive cases --tag phishing --older-than 90d --limit 3
+3 of 1284 cases, newest first
+NUMBER  CREATED           STATUS                   SEVERITY  TLP    OWNER  TITLE
+#40211  2025-06-30 14:02  Resolved: FalsePositive  medium    AMBER  alice  Suspicious invoice from example.com
+#40187  2025-06-29 09:41  Open                     high      AMBER  bob    Credential phishing wave
+#40102  2025-06-27 17:15  Resolved: TruePositive   medium    GREEN  alice  Reported mail with a link to 192.0.2.10
 
 $ th3tb hive templates
 NAME      TITLE PREFIX  SEVERITY  TLP    PAP    TASKS  CUSTOM FIELDS  METRICS
@@ -173,6 +187,30 @@ GeoIp_2_0
   proxy_http  null
 ```
 
+### Cases and alerts on large instances
+
+These commands query the same Elasticsearch the instance runs on, so they are
+built to stay cheap even on indices holding millions of cases:
+
+- Filters become term, terms, range and match queries only, all answered from
+  the inverted index. Wildcard and `query_string` queries, which can scan whole
+  fields, are never generated: `--title` matches whole words (every one of them
+  must occur), not substrings.
+- A listing is one plain search for at most 100 results (`--limit`, 50 by
+  default), sorted newest first. Beyond twice its `search.pagesize` (50 by
+  default) TheHive switches to a scroll, which holds a context open on the
+  cluster; the limit keeps every listing below that.
+- `--count` fetches a single result without sorting and reads the total from the
+  `X-Total` header.
+- A listing makes no follow-up request per result. Only `case` fetches tasks and
+  observables, the same queries the GUI makes when opening a case, in pages of
+  100 and up to 1000 of each.
+- Cases with status `Deleted` (TheHive's soft delete, hidden in the GUI) are left
+  out unless asked for with `--status Deleted`; deleted observables never show.
+
+Ages are given as `30d`, `12w`, `2y` or a date `YYYY-MM-DD`, and apply to the
+creation time. Times are shown and dates read in local time.
+
 ### Comparing and backing up TheHive configuration
 
 `th3tb hive export` prints the case templates (tasks included), custom field
@@ -214,6 +252,11 @@ is permanently yellow, which TheHive reports as WARNING.
 - Cortex 2 does not implement `/api/health` (it answers 501) and reports no
   component health, so for Cortex `status` only checks that the application
   answers.
+- Every request authenticated with an API key makes TheHive read through all
+  active users with a scroll, to find the one holding the key: the key field
+  cannot be searched. The cost grows with the number of users, not with the size
+  of the index, and every API-key integration pays it; unauthenticated requests
+  (`status`) do not.
 - The ZIP password is the one TheHive uses to wrap downloaded attachments
   (`datastore.attachment.password`, `malware` by default). The GUI shows it next
   to every download, so it is not a secret.

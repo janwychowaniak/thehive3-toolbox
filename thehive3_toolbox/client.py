@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Optional
+from typing import Any, List, Optional, Tuple
 
 import requests
 import urllib3
@@ -12,6 +12,10 @@ from . import ToolboxError, __version__
 from .config import AppConfig, ConfigError, env_name
 
 TIMEOUT = 30  # seconds, per request
+# elastic4play serves a search as one plain Elasticsearch query up to twice its
+# search.pagesize (50 by default); anything larger switches to a scroll, which
+# holds a context open on the cluster. One page is kept within that bound.
+MAX_PAGE = 100
 
 
 class ApiError(ToolboxError):
@@ -37,8 +41,30 @@ class Client:
     def post(self, path: str, body: Any, *, params: Optional[dict] = None) -> Any:
         return self._request("POST", path, auth=True, params=params, body=body)
 
+    def search(self, path: str, query: Optional[dict] = None, *, limit: int, offset: int = 0,
+               sort: Optional[str] = None) -> Tuple[List[Any], int]:
+        """One page of an elastic4play search and the total number of hits.
+
+        elastic4play reads the page as range=<from>-<to>; note that it turns an
+        empty range such as 0-0 into its default of 10 results.
+        """
+        if not 1 <= limit <= MAX_PAGE:
+            raise ValueError(f"page size {limit} out of 1..{MAX_PAGE}")
+        params = {"range": f"{offset}-{offset + limit}"}
+        if sort:
+            params["sort"] = sort
+        resp = self._send("POST", path, auth=True, params=params,
+                          body={"query": query} if query else {})
+        items = self._json(resp, "POST", path)
+        return items, int(resp.headers.get("X-Total", len(items)))
+
     def _request(self, method: str, path: str, *, auth: bool,
                  params: Optional[dict] = None, body: Any = None) -> Any:
+        return self._json(self._send(method, path, auth=auth, params=params, body=body),
+                          method, path)
+
+    def _send(self, method: str, path: str, *, auth: bool,
+              params: Optional[dict] = None, body: Any = None) -> requests.Response:
         url = self.config.url + path
         headers = {}
         if auth:
@@ -73,11 +99,14 @@ class Client:
         if not resp.ok:
             raise ApiError(f"HTTP {resp.status_code} from {method} {path}: {_brief(resp)}",
                            resp.status_code)
+        return resp
+
+    def _json(self, resp: requests.Response, method: str, path: str) -> Any:
         try:
             return resp.json()
         except ValueError:
-            raise ApiError(f"{method} {path} did not return JSON; is {url} really "
-                           "the application's base URL?")
+            raise ApiError(f"{method} {path} did not return JSON; is {self.config.url} "
+                           "really the application's base URL?")
 
 
 def _ssl_reason(exc: Exception) -> str:
