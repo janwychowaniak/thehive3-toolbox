@@ -1,6 +1,7 @@
 import argparse
 import contextlib
 import io
+import time
 import unittest
 
 from thehive3_toolbox import hive
@@ -145,11 +146,51 @@ class QuerySafetyTest(unittest.TestCase):
 class CaseColumnTest(unittest.TestCase):
 
     def test_live_deleted_and_missing_cases(self):
-        child = {"_parent": "c9"}
-        self.assertEqual(hive._case_number({"caseId": 7, "status": "Open"}, child), "#7")
-        self.assertEqual(hive._case_number({"caseId": 7, "status": "Deleted"}, child), "#7 (Deleted)")
-        self.assertEqual(hive._case_number(None, child), "c9 (missing)")
-        self.assertEqual(hive._case_summary(None, child), {"id": "c9", "missing": True})
+        self.assertEqual(hive._case_number({"caseId": 7, "status": "Open"}, "c9"), "#7")
+        self.assertEqual(hive._case_number({"caseId": 7, "status": "Deleted"}, "c9"), "#7 (Deleted)")
+        self.assertEqual(hive._case_number(None, "c9"), "c9 (missing)")
+        self.assertEqual(hive._case_summary(None, "c9"), {"id": "c9", "missing": True})
+
+    def test_no_case_for_results_outside_a_case(self):
+        self.assertIsNone(hive._case_number(None, None))
+        self.assertIsNone(hive._case_summary(None, None))
+
+
+class AuditTest(unittest.TestCase):
+
+    EVERY_FILTER = ["--user", "alice", "--operation", "Delete", "--operation", "Update",
+                    "--object-type", "case", "--object", "o1", "--older-than", "1d"]
+
+    def test_filters_use_cheap_operators_only(self):
+        (search,) = run("audit", *self.EVERY_FILTER)
+        self.assertLessEqual(set(operators(search["query"])), ALLOWED_OPERATORS)
+
+    def test_last_seven_days_by_default(self):
+        (search,) = run("audit")
+        (since,) = [c["_gt"]["createdAt"] for c in search["query"]["_and"] if "_gt" in c]
+        self.assertAlmostEqual(since, (time.time() - 7 * 86400) * 1000, delta=60 * 1000)
+
+    def test_whole_history_of_one_object_or_case(self):
+        (search,) = run("audit", "--object", "o1")
+        self.assertFalse([c for c in search["query"]["_and"] if "_gt" in c])
+        lookup, search = run("audit", "--case", "7",
+                             results={"/api/case/_search": [{"id": "c7", "caseId": 7}]})
+        self.assertEqual(lookup["query"], {"caseId": 7})
+        self.assertIn({"rootId": "c7"}, search["query"]["_and"])
+        self.assertFalse([c for c in search["query"]["_and"] if "_gt" in c])
+
+    def test_case_only_for_objects_of_a_case(self):
+        self.assertEqual(hive._audit_case_id({"objectType": "case_task", "rootId": "c1"}), "c1")
+        self.assertIsNone(hive._audit_case_id({"objectType": "alert", "rootId": "a1"}))
+
+    def test_changes_leave_out_empty_values_and_internal_fields(self):
+        self.assertEqual(hive._changes({"_id": "x", "metrics": {}, "tags": [], "description": None,
+                                        "status": "Resolved"}), "status=Resolved")
+        self.assertIsNone(hive._changes({"metrics": {}}))
+
+    def test_changes_are_shown_compactly(self):
+        self.assertEqual(hive._changes({"status": "Resolved", "tlp": 2, "summary": "x" * 40}),
+                         "status=Resolved, summary=" + "x" * 27 + "..., tlp=2")
 
 
 if __name__ == "__main__":

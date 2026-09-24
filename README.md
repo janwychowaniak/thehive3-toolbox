@@ -76,6 +76,7 @@ th3tb hive   status | whoami | users  [--json]
 th3tb hive   cases | alerts | observables | tasks  [filters] [--limit N] [--count] [--json]
 th3tb hive   case NUMBER|ID  [--json]
 th3tb hive   stats  [--newer-than AGE] [--older-than AGE] [--top N] [--json]
+th3tb hive   audit  [filters] [--limit N] [--count] [--json]
 th3tb hive   alert ID  [--json]
 th3tb hive   templates | custom-fields | data-types | report-templates  [--json]
 th3tb hive   export
@@ -95,6 +96,7 @@ th3tb cortex analyzers | responders  [--show-config] [--json]
 | `observables` | TheHive only: observables of all cases matching `--value` (exact; for files, a hash of the file), `--type`, `--ioc`, `--tag`, `--older-than` and `--newer-than`, newest first, with their case | any valid key |
 | `tasks` | TheHive only: tasks of all cases matching `--status` (Waiting and InProgress by default), `--owner`, `--title`, `--older-than` and `--newer-than`, newest first, with their case | any valid key |
 | `stats` | TheHive only: counts of cases and alerts created in a time window (the last 30 days by default), by status, resolution, severity, owner, tag, source and type, and per day, week or month | any valid key |
+| `audit` | TheHive only: who created, updated or deleted what, newest first, by `--user`, `--operation`, `--object-type`, `--object`, `--case` and age; the last 7 days unless the history of one case or object is asked for | any valid key |
 | `templates` | TheHive only: case templates and what they preset (severity, TLP, PAP, tasks, custom fields, metrics) | any valid key |
 | `custom-fields` | TheHive only: definitions of custom fields | any valid key |
 | `data-types` | TheHive only: observable data types, the defaults told from those added locally | any valid key |
@@ -293,6 +295,32 @@ Monday) or months in UTC, as Elasticsearch aligns them, and empty ones at both
 ends of the window are filled in. With many shards, the top values of fields
 holding many different values (owners, tags, sources, types) are approximate,
 as usual with Elasticsearch terms aggregations.
+
+### Audit trail
+
+`th3tb hive audit` lists TheHive's audit entries: who (`--user`) created,
+updated or deleted (`--operation`) which object (`--object-type`, `--object`),
+and when, with the attributes the entry records. `--case` shows the whole history
+of one case and everything in it (tasks, logs, observables, analyzer jobs), by
+number or id.
+
+Audit entries are the most numerous documents of an instance, so a listing
+without its own start (`--newer-than`) keeps to the last 7 days; the history of
+one case or object is shown whole. Everything else works as for the other
+listings, `--limit`, `--count` and the limit on large match sets included.
+
+```
+$ th3tb hive audit --case 40211
+4 of 4 audit entries, newest first
+TIME              USER        OPERATION  OBJECT         OBJECT ID                         CASE    CHANGES
+2025-07-02 10:14  alice       Update     case           AYdE2kqFbT1x0p9QwZrA              #40211  resolutionStatus=FalsePositive, status=Resolved, summary=Legitimate invoice
+2025-06-30 14:20  alice       Update     case_task      AYdE2mNFbT1x0p9QwZrD              #40211  owner=alice, status=InProgress
+2025-06-30 14:05  svc-alerts  Creation   case_artifact  5f2b8c0e9a7d4e61b3c2a1f0d9e8c7b6  #40211  dataType=ip, ioc=true, message=Sender IP
+2025-06-30 14:02  svc-alerts  Creation   case           AYdE2kqFbT1x0p9QwZrA              #40211  severity=2, status=Open, title=Suspicious invoice from exa..., tlp=2
+```
+
+The CHANGES column leaves out empty values and internal fields; `--json` has
+every attribute of every entry.
 
 ### Comparing and backing up TheHive configuration
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import json
 import re
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -23,6 +24,7 @@ COMMANDS = [
     ("observables", "observables of all cases matching the filters, newest first, with their case"),
     ("tasks", "tasks of all cases matching the filters, newest first, with their case"),
     ("stats", "counts of cases and alerts created in a time window (last 30 days by default)"),
+    ("audit", "who created, updated or deleted what, newest first (last 7 days by default)"),
     ("templates", "case templates and what they preset"),
     ("custom-fields", "definitions of custom fields"),
     ("data-types", "observable data types, the default ones told from those added locally"),
@@ -270,6 +272,10 @@ def _clean(entity: Dict[str, Any]) -> Dict[str, Any]:
 CASE_STATUSES = ["Open", "Resolved", "Deleted"]
 ALERT_STATUSES = ["New", "Updated", "Ignored", "Imported"]
 TASK_STATUSES = ["Waiting", "InProgress", "Completed", "Cancel"]
+AUDIT_OPERATIONS = ["Creation", "Update", "Delete"]
+AUDIT_WINDOW_DAYS = 7
+# Objects whose audit entries carry the id of their case as rootId.
+CASE_CLUSTER_TYPES = {"case", "case_artifact", "case_task", "case_task_log", "case_artifact_job"}
 RESOLUTIONS = ["TruePositive", "FalsePositive", "Indeterminate", "Other", "Duplicated"]
 DEFAULT_LIMIT = 100  # up to here elastic4play answers with one plain search
 DETAIL_CAP = 1000  # tasks or observables shown for one case
@@ -297,6 +303,15 @@ def add_arguments(command: str, parser: argparse.ArgumentParser) -> None:
         parser.add_argument("--status", action="append", choices=TASK_STATUSES,
                             help="only this status (repeatable); by default Waiting and InProgress")
         parser.add_argument("--owner", metavar="LOGIN", help="only tasks assigned to this user")
+    elif command == "audit":
+        parser.add_argument("--user", metavar="LOGIN", help="only what this user did")
+        parser.add_argument("--operation", action="append", choices=AUDIT_OPERATIONS,
+                            help="only this operation (repeatable)")
+        parser.add_argument("--object-type", metavar="TYPE",
+                            help="only this kind of object, e.g. case, case_artifact, case_task, alert, user")
+        parser.add_argument("--object", metavar="ID", help="only this object: its whole history")
+        parser.add_argument("--case", metavar="NUMBER|ID",
+                            help="only this case and everything in it: its whole history")
     elif command == "stats":
         parser.add_argument("--newer-than", type=_cutoff, metavar="AGE",
                             help="window start: 30d, 12w, 2y or a date YYYY-MM-DD "
@@ -312,11 +327,11 @@ def add_arguments(command: str, parser: argparse.ArgumentParser) -> None:
     elif command == "alert":
         parser.add_argument("alert_id", metavar="ID", help="alert id, as listed by alerts")
 
-    if command in ("cases", "alerts", "observables", "tasks"):
-        if command != "tasks":
+    if command in ("cases", "alerts", "observables", "tasks", "audit"):
+        if command in ("cases", "alerts", "observables"):
             parser.add_argument("--tag", action="append",
                                 help="only with this tag (repeatable: all must match)")
-        if command != "observables":
+        if command in ("cases", "alerts", "tasks"):
             parser.add_argument("--title", metavar="WORDS", help="every word must occur in the title")
         parser.add_argument("--older-than", type=_cutoff, metavar="AGE",
                             help="created before: 30d, 12w, 2y or a date YYYY-MM-DD")
@@ -367,8 +382,9 @@ def cmd_observables(client: Client, args: argparse.Namespace) -> int:
     return _listing(client, args, "/api/case/artifact/_search", clauses, "observables",
                     ["CREATED", "TYPE", "VALUE", "IOC", "CASE", "CASE TITLE"],
                     lambda o, case: [_when(o.get("createdAt")), o.get("dataType"), _observable_value(o),
-                                     bool(o.get("ioc")), _case_number(case, o), (case or {}).get("title")],
-                    with_case=True)
+                                     bool(o.get("ioc")), _case_number(case, o.get("_parent")),
+                                     (case or {}).get("title")],
+                    case_of=lambda o: o.get("_parent"))
 
 
 def cmd_tasks(client: Client, args: argparse.Namespace) -> int:
@@ -378,8 +394,53 @@ def cmd_tasks(client: Client, args: argparse.Namespace) -> int:
     return _listing(client, args, "/api/case/task/_search", clauses, "tasks",
                     ["CREATED", "STATUS", "OWNER", "TASK", "CASE", "CASE TITLE"],
                     lambda t, case: [_when(t.get("createdAt")), t.get("status"), t.get("owner"),
-                                     t.get("title"), _case_number(case, t), (case or {}).get("title")],
-                    with_case=True)
+                                     t.get("title"), _case_number(case, t.get("_parent")),
+                                     (case or {}).get("title")],
+                    case_of=lambda t: t.get("_parent"))
+
+
+def cmd_audit(client: Client, args: argparse.Namespace) -> int:
+    # Audit entries are the most numerous documents of an instance, so without a
+    # start of their own, listings keep to the last days; the history of one case
+    # or object is small and shown whole.
+    clauses = _filters(args)
+    if args.newer_than is None and not (args.case or args.object):
+        clauses.append({"_gt": {"createdAt": int(time.time() * 1000) - AUDIT_WINDOW_DAYS * _DAY_MS}})
+        output.note(f"Last {AUDIT_WINDOW_DAYS} days (--newer-than widens the window)")
+    if args.user:
+        clauses.append({"createdBy": args.user})
+    if args.operation:
+        clauses.append(_in("operation", args.operation))
+    if args.object_type:
+        clauses.append({"objectType": args.object_type})
+    if args.object:
+        clauses.append({"objectId": args.object})
+    if args.case:
+        clauses.append({"rootId": _find_case(client, args.case)["id"]})
+    return _listing(client, args, "/api/audit/_search", clauses, "audit entries",
+                    ["TIME", "USER", "OPERATION", "OBJECT", "OBJECT ID", "CASE", "CHANGES"],
+                    lambda a, case: [_when(a.get("createdAt")), a.get("createdBy"), a.get("operation"),
+                                     a.get("objectType"), a.get("objectId"),
+                                     _case_number(case, _audit_case_id(a)), _changes(a.get("details"))],
+                    case_of=_audit_case_id, max_width=120)  # the changes are the point here
+
+
+def _audit_case_id(entry: Dict[str, Any]) -> Optional[str]:
+    return entry.get("rootId") if entry.get("objectType") in CASE_CLUSTER_TYPES else None
+
+
+def _changes(details: Any) -> Optional[str]:
+    """The attributes an audit entry records, as name=value, long values cut short.
+    Empty values and internal fields (_id, ...) are left out here; --json keeps them."""
+    if not isinstance(details, dict):
+        return None
+    parts = []
+    for name, value in sorted(details.items()):
+        if name.startswith("_") or value in (None, "", {}, []):
+            continue
+        shown = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+        parts.append(f"{name}={shown if len(shown) <= 30 else shown[:27] + '...'}")
+    return ", ".join(parts) or None
 
 
 def cmd_case(client: Client, args: argparse.Namespace) -> int:
@@ -467,9 +528,10 @@ def cmd_alert(client: Client, args: argparse.Namespace) -> int:
 def _listing(client: Client, args: argparse.Namespace, path: str, clauses: List[Dict[str, Any]],
              noun: str, headers: List[str],
              row: Callable[[Dict[str, Any], Optional[Dict[str, Any]]], List[Any]],
-             with_case: bool = False) -> int:
-    """List one page of results; with_case also looks up, in a single search, the
-    cases the listed tasks or observables belong to."""
+             case_of: Optional[Callable[[Dict[str, Any]], Optional[str]]] = None,
+             max_width: int = 60) -> int:
+    """List one page of results. With case_of, telling the case id of a result
+    (or None), the cases of the whole page are also looked up, in one search."""
     query = {"_and": clauses} if clauses else None
     if args.count:
         # One result and no sorting: the total comes from the X-Total header.
@@ -493,36 +555,41 @@ def _listing(client: Client, args: argparse.Namespace, path: str, clauses: List[
                 f"with --newer-than and --older-than) or keep --limit at {DEFAULT_LIMIT} or below.")
         limit = max(1, min(limit, total))  # a small set still gets one plain search
     items, total = client.search(path, query, limit=limit, sort="-createdAt")
-    cases = _parent_cases(client, items) if with_case else {}
+    cases = _cases_by_id(client, [case_of(i) for i in items]) if case_of else {}
     output.note(f"{len(items)} of {total} {noun}, newest first")
     if args.json:
-        output.print_json([dict(_no_meta(i), case=_case_summary(cases.get(i.get("_parent")), i))
-                           if with_case else _no_meta(i) for i in items])
+        output.print_json([dict(_no_meta(i), case=_case_summary(cases.get(case_of(i)), case_of(i)))
+                           if case_of else _no_meta(i) for i in items])
     else:
-        output.print_table(headers, [row(i, cases.get(i.get("_parent"))) for i in items])
+        output.print_table(headers, [row(i, cases.get(case_of(i)) if case_of else None)
+                                     for i in items], max_width=max_width)
     return 0
 
 
-def _parent_cases(client: Client, items: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """The cases of listed tasks or observables, fetched with one ids query."""
-    ids = sorted({i["_parent"] for i in items if i.get("_parent")})
-    if not ids:
+def _cases_by_id(client: Client, ids: List[Optional[str]]) -> Dict[str, Dict[str, Any]]:
+    """The cases of a page of results, fetched with one ids query."""
+    wanted = sorted({i for i in ids if i})
+    if not wanted:
         return {}
-    found, _ = client.search("/api/case/_search", _in("_id", ids), limit=len(ids))
+    found, _ = client.search("/api/case/_search", _in("_id", wanted), limit=len(wanted))
     return {c["id"]: c for c in found}
 
 
-def _case_number(case: Optional[Dict[str, Any]], child: Dict[str, Any]) -> str:
+def _case_number(case: Optional[Dict[str, Any]], case_id: Optional[str]) -> Optional[str]:
+    if case_id is None:
+        return None
     if case is None:
-        # A task or observable whose case is gone altogether (not just soft-deleted).
-        return f"{child.get('_parent')} (missing)"
+        # A case gone altogether, not just soft-deleted.
+        return f"{case_id} (missing)"
     deleted = " (Deleted)" if case.get("status") == "Deleted" else ""
     return f"#{case.get('caseId')}{deleted}"
 
 
-def _case_summary(case: Optional[Dict[str, Any]], child: Dict[str, Any]) -> Dict[str, Any]:
+def _case_summary(case: Optional[Dict[str, Any]], case_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    if case_id is None:
+        return None
     if case is None:
-        return {"id": child.get("_parent"), "missing": True}
+        return {"id": case_id, "missing": True}
     return {"id": case.get("id"), "number": case.get("caseId"), "title": case.get("title"),
             "status": case.get("status")}
 
