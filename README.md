@@ -75,6 +75,7 @@ but `*_VERIFY` takes precedence.
 th3tb hive   status | whoami | users  [--json]
 th3tb hive   cases | alerts | observables | tasks  [filters] [--limit N] [--count] [--json]
 th3tb hive   case NUMBER|ID  [--json]
+th3tb hive   stats  [--newer-than AGE] [--older-than AGE] [--top N] [--json]
 th3tb hive   alert ID  [--json]
 th3tb hive   templates | custom-fields | data-types | report-templates  [--json]
 th3tb hive   export
@@ -93,6 +94,7 @@ th3tb cortex analyzers | responders  [--show-config] [--json]
 | `alert` | TheHive only: one alert, by id, with its observables and linked case | any valid key |
 | `observables` | TheHive only: observables of all cases matching `--value` (exact; for files, a hash of the file), `--type`, `--ioc`, `--tag`, `--older-than` and `--newer-than`, newest first, with their case | any valid key |
 | `tasks` | TheHive only: tasks of all cases matching `--status` (Waiting and InProgress by default), `--owner`, `--title`, `--older-than` and `--newer-than`, newest first, with their case | any valid key |
+| `stats` | TheHive only: counts of cases and alerts created in a time window (the last 30 days by default), by status, resolution, severity, owner, tag, source and type, and per day, week or month | any valid key |
 | `templates` | TheHive only: case templates and what they preset (severity, TLP, PAP, tasks, custom fields, metrics) | any valid key |
 | `custom-fields` | TheHive only: definitions of custom fields | any valid key |
 | `data-types` | TheHive only: observable data types, the defaults told from those added locally | any valid key |
@@ -240,6 +242,57 @@ The resolution of a resolved case (`TruePositive`, `FalsePositive`,
 `Indeterminate`, `Other`, `Duplicated`) shows in the STATUS column and can be
 filtered on with `--resolution`. Its impact (`impactStatus`) is in the `--json`
 output.
+
+### Statistics
+
+`th3tb hive stats` counts the cases (soft-deleted ones left out) and alerts
+created in a time window: the last 30 days by default, or any other window given
+with `--newer-than` and `--older-than` (with only `--older-than`, the 30 days
+before it). Cases are broken down by status, resolution, severity, owner and tag,
+alerts by status, source and type, both also per day, week or month depending on
+the length of the window. For fields that hold one value per document, the
+documents outside the top rows are summed up as `(other or none)`.
+
+```
+$ th3tb hive stats --top 3
+Created between 2025-08-31 09:00 and 2025-09-30 09:00
+
+CASES: 412 (soft-deleted ones left out)
+
+STATUS    COUNT
+Resolved  371
+Open      41
+
+RESOLUTION       COUNT
+FalsePositive    198
+TruePositive     121
+Other            52
+(other or none)  41
+
+OWNER            COUNT
+alice            140
+bob              131
+carol            97
+(other or none)  44
+
+...
+
+DAY (UTC)   COUNT
+2025-09-01  17     ###############################
+2025-09-02  22     ########################################
+2025-09-03  15     ###########################
+2025-09-04  0
+...
+```
+
+Each breakdown is one terms aggregation, and each timeline one date histogram,
+over the documents of the window only: TheHive's `_stats` merges the buckets of
+several aggregations into one flat object, so they are requested one by one.
+Scripted aggregations are never used. Periods are calendar days, weeks (from
+Monday) or months in UTC, as Elasticsearch aligns them, and empty ones at both
+ends of the window are filled in. With many shards, the top values of fields
+holding many different values (owners, tags, sources, types) are approximate,
+as usual with Elasticsearch terms aggregations.
 
 ### Comparing and backing up TheHive configuration
 

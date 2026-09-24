@@ -22,6 +22,7 @@ COMMANDS = [
     ("alert", "one alert with its observables"),
     ("observables", "observables of all cases matching the filters, newest first, with their case"),
     ("tasks", "tasks of all cases matching the filters, newest first, with their case"),
+    ("stats", "counts of cases and alerts created in a time window (last 30 days by default)"),
     ("templates", "case templates and what they preset"),
     ("custom-fields", "definitions of custom fields"),
     ("data-types", "observable data types, the default ones told from those added locally"),
@@ -296,6 +297,15 @@ def add_arguments(command: str, parser: argparse.ArgumentParser) -> None:
         parser.add_argument("--status", action="append", choices=TASK_STATUSES,
                             help="only this status (repeatable); by default Waiting and InProgress")
         parser.add_argument("--owner", metavar="LOGIN", help="only tasks assigned to this user")
+    elif command == "stats":
+        parser.add_argument("--newer-than", type=_cutoff, metavar="AGE",
+                            help="window start: 30d, 12w, 2y or a date YYYY-MM-DD "
+                                 "(default: 30 days before the window end)")
+        parser.add_argument("--older-than", type=_cutoff, metavar="AGE",
+                            help="window end: 30d, 12w, 2y or a date YYYY-MM-DD (default: now)")
+        parser.add_argument("--top", type=_top, default=10,
+                            help="how many owners, tags, sources and types to show (default 10, "
+                                 "at most 100; approximate for values spread over many shards)")
     elif command == "case":
         parser.add_argument("ref", metavar="NUMBER|ID",
                             help="case number as shown in the GUI (with or without #), or case id")
@@ -621,3 +631,154 @@ def _limit(value: str) -> int:
         raise argparse.ArgumentTypeError(
             f"expected 1 to {MAX_RESULTS} (narrow larger sets down with filters), got {value!r}")
     return limit
+
+
+# --- Statistics ----------------------------------------------------------------
+#
+# Only terms aggregations and date histograms on createdAt, never the script-based
+# ones elastic4play also offers. TheHive's _stats flattens the buckets of all
+# aggregations of one request into a single object, so each dimension is asked
+# for separately: one pass over the doc values of the window's documents each.
+
+STATS_WINDOW_DAYS = 30
+_DAY_MS = 86400 * 1000
+_INTERVALS = {"day": "1d", "week": "1w", "month": "1M"}
+
+
+def cmd_stats(client: Client, args: argparse.Namespace) -> int:
+    end = args.older_than if args.older_than is not None else int(time.time() * 1000)
+    start = args.newer_than if args.newer_than is not None else end - STATS_WINDOW_DAYS * _DAY_MS
+    if start >= end:
+        raise ToolboxError("the time window is empty: its start (--newer-than) must come "
+                           "before its end (--older-than)")
+    days = (end - start) / _DAY_MS
+    unit = "day" if days <= 31 else "week" if days <= 183 else "month"
+    window = [{"_gt": {"createdAt": start}}, {"_lt": {"createdAt": end}}]
+    case_query = {"_and": [_in("status", ["Open", "Resolved"])] + window}
+    alert_query = {"_and": window}
+
+    cases = {
+        "status": _terms(client, "case", case_query, "status", 10),
+        "resolution": _terms(client, "case", case_query, "resolutionStatus", 10),
+        "severity": {_SEVERITY.get(_int_or(k), k): n
+                     for k, n in _terms(client, "case", case_query, "severity", 10).items()},
+        "owner": _terms(client, "case", case_query, "owner", args.top),
+        "tags": _terms(client, "case", case_query, "tags", args.top),
+        "created": _histogram(client, "case", case_query, unit, start, end),
+    }
+    cases["total"] = sum(cases["status"].values())
+    alerts = {
+        "status": _terms(client, "alert", alert_query, "status", 10),
+        "source": _terms(client, "alert", alert_query, "source", args.top),
+        "type": _terms(client, "alert", alert_query, "type", args.top),
+        "created": _histogram(client, "alert", alert_query, unit, start, end),
+    }
+    alerts["total"] = sum(alerts["status"].values())
+
+    if args.json:
+        output.print_json({"window": {"from": _iso(start), "to": _iso(end)}, "period": unit,
+                           "cases": cases, "alerts": alerts})
+        return 0
+
+    print(f"Created between {_when(start)} and {_when(end)}\n")
+    print(f"CASES: {cases['total']} (soft-deleted ones left out)")
+    for title, key, single in (("STATUS", "status", True), ("RESOLUTION", "resolution", True),
+                               ("SEVERITY", "severity", True), ("OWNER", "owner", True),
+                               ("TAG", "tags", False)):
+        _print_counts(title, cases[key], cases["total"] if single else None)
+    _print_periods(unit, cases["created"])
+    print(f"\nALERTS: {alerts['total']}")
+    for title, key in (("STATUS", "status"), ("SOURCE", "source"), ("TYPE", "type")):
+        _print_counts(title, alerts[key], alerts["total"])
+    _print_periods(unit, alerts["created"])
+    return 0
+
+
+def _terms(client: Client, entity: str, query: Dict[str, Any], field: str, size: int) -> Dict[str, int]:
+    """The most frequent values of one field, most frequent first."""
+    found = client.post(f"/api/{entity}/_stats", {"query": query, "stats": [
+        {"_agg": "field", "_field": field, "_size": size, "_select": [{"_agg": "count"}]}]})
+    counts = {key: value.get("count", 0) for key, value in found.items()}
+    return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
+def _histogram(client: Client, entity: str, query: Dict[str, Any], unit: str,
+               start: int, end: int) -> List[Dict[str, Any]]:
+    """Documents created per period of the window. Elasticsearch only returns the
+    periods between the first and the last document, so the empty ones at both
+    ends are filled in; periods are aligned as Elasticsearch aligns them: in UTC,
+    weeks starting on Monday."""
+    found = client.post(f"/api/{entity}/_stats", {"query": query, "stats": [
+        {"_agg": "time", "_fields": ["createdAt"], "_interval": _INTERVALS[unit],
+         "_select": [{"_agg": "count"}]}]})
+    counts = {int(key): value.get("createdAt", {}).get("count", 0) for key, value in found.items()}
+    periods = dict.fromkeys(_period_starts(start, end, unit), 0)
+    periods.update(counts)  # never drop a count, even one Elasticsearch aligned differently
+    return [{"period": _period_label(ms, unit), "count": n} for ms, n in sorted(periods.items())]
+
+
+def _period_starts(start: int, end: int, unit: str) -> List[int]:
+    utc = datetime.timezone.utc
+    current = datetime.datetime.fromtimestamp(start / 1000, utc).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    if unit == "week":
+        current -= datetime.timedelta(days=current.weekday())
+    elif unit == "month":
+        current = current.replace(day=1)
+    last = datetime.datetime.fromtimestamp(end / 1000, utc)
+    starts = []
+    while current <= last:
+        starts.append(int(current.timestamp() * 1000))
+        if unit == "month":
+            current = current.replace(year=current.year + current.month // 12,
+                                      month=current.month % 12 + 1)
+        else:
+            current += datetime.timedelta(days=7 if unit == "week" else 1)
+    return starts
+
+
+def _period_label(ms: int, unit: str) -> str:
+    moment = datetime.datetime.fromtimestamp(ms / 1000, datetime.timezone.utc)
+    return moment.strftime("%Y-%m" if unit == "month" else "%Y-%m-%d")
+
+
+def _print_counts(title: str, counts: Dict[str, int], total: Optional[int]) -> None:
+    """One dimension as a table; for fields holding a single value per document,
+    the documents not counted in the rows shown are summed up in a last row."""
+    rows: List[List[Any]] = [[key, n] for key, n in counts.items()]
+    rest = total - sum(counts.values()) if total is not None else 0
+    if rest > 0:
+        rows.append(["(other or none)", rest])
+    print()
+    rows = rows or [["(none)", 0]]
+    output.print_table([title, "COUNT"], rows)
+
+
+def _print_periods(unit: str, periods: List[Dict[str, Any]]) -> None:
+    peak = max((p["count"] for p in periods), default=0)
+    print()
+    output.print_table([{"day": "DAY (UTC)", "week": "WEEK FROM (UTC)", "month": "MONTH (UTC)"}[unit],
+                        "COUNT", ""],
+                       [[p["period"], p["count"], ("#" * round(40 * p["count"] / peak) if peak else "") or " "]
+                        for p in periods])
+
+
+def _int_or(value: str) -> Any:
+    try:
+        return int(value)
+    except ValueError:
+        return value
+
+
+def _iso(ms: int) -> str:
+    return datetime.datetime.fromtimestamp(ms / 1000).astimezone().isoformat(timespec="minutes")
+
+
+def _top(value: str) -> int:
+    try:
+        top = int(value)
+    except ValueError:
+        top = 0
+    if not 1 <= top <= 100:
+        raise argparse.ArgumentTypeError(f"expected 1 to 100, got {value!r}")
+    return top
