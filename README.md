@@ -73,6 +73,8 @@ but `*_VERIFY` takes precedence.
 
 ```
 th3tb hive   status | whoami | users  [--json]
+th3tb hive   templates | custom-fields | data-types | report-templates  [--json]
+th3tb hive   export
 th3tb cortex status | whoami | users  [--json]
 th3tb cortex analyzers | responders  [--show-config] [--json]
 ```
@@ -82,6 +84,11 @@ th3tb cortex analyzers | responders  [--show-config] [--json]
 | `status` | version, health of the components, authentication methods | no API key |
 | `whoami` | the user behind the configured API key and its roles | any valid key |
 | `users`  | users with their roles, status and whether they have an API key | TheHive: any valid key; Cortex: `orgadmin` (own organization) or `superadmin` (all organizations) |
+| `templates` | TheHive only: case templates and what they preset (severity, TLP, PAP, tasks, custom fields, metrics) | any valid key |
+| `custom-fields` | TheHive only: definitions of custom fields | any valid key |
+| `data-types` | TheHive only: observable data types, the defaults told from those added locally | any valid key |
+| `report-templates` | TheHive only: report templates of Cortex analyzers | any valid key; the Cortex connector enabled |
+| `export` | TheHive only: all of the above plus case metrics as one JSON document | any valid key |
 | `analyzers`, `responders` | Cortex only: workers enabled in the key's organization and the state of their definitions; with `--show-config` also their full configuration | any valid key; checking definitions needs `orgadmin` or `superadmin`; `--show-config` needs `orgadmin` |
 
 ```
@@ -101,6 +108,20 @@ alice       Alice Example  read, write, admin  Ok      no
 bob         Bob Example    read, write         Locked  no
 svc-alerts  Alert feed     read, write, alert  Ok      yes
 
+$ th3tb hive templates
+NAME      TITLE PREFIX  SEVERITY  TLP    PAP    TASKS  CUSTOM FIELDS  METRICS
+Malware   -             high      RED    GREEN  0      0              0
+Phishing  [PHISH]       medium    AMBER  AMBER  2      1              1
+
+$ th3tb hive data-types
+16 data types, 2 of them added locally; default ones removed: regexp
+DATA TYPE          ORIGIN
+autonomous-system  default
+...
+iban               local
+...
+wallet             local
+
 $ th3tb cortex users
 Users of organization analysts (orgadmin sees only its own)
 ORGANIZATION  LOGIN        NAME                 ROLES                    STATUS  API KEY  PASSWORD
@@ -118,6 +139,9 @@ Sandbox_1_0    1.0      update available (1.2)
 
 `--json` prints the same data as JSON. Notes and warnings go to stderr, so
 stdout can be piped (for example to `jq`).
+
+Tables cut values longer than 60 characters short; `--json` always has them in
+full.
 
 `users` never reads the API keys themselves, only whether a user has one. In
 Cortex, a key without a password usually marks an integration account.
@@ -148,6 +172,24 @@ GeoIp_2_0
   max_tlp     2
   proxy_http  null
 ```
+
+### Comparing and backing up TheHive configuration
+
+`th3tb hive export` prints the case templates (tasks included), custom field
+definitions, case metrics, observable data types and report templates (HTML
+content included) as one JSON document. Fields that differ between instances by
+nature (ids, creation and update times, authors) are left out and everything is
+sorted, so two exports differ only where the configuration really does:
+
+```sh
+TH3TB_HIVE_URL=https://thehive-a.example.com th3tb hive export > a.json
+TH3TB_HIVE_URL=https://thehive-b.example.com th3tb hive export > b.json
+diff a.json b.json
+```
+
+The same works over time, to see what changed on one instance. Case metrics are
+TheHive 3's numeric per-case values, which the GUI asks for when a case is
+closed; they only appear in the export.
 
 ### Exit status
 

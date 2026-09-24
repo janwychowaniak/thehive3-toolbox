@@ -17,6 +17,10 @@ TIMEOUT = 30  # seconds, per request
 class ApiError(ToolboxError):
     """The application could not be reached or refused the request."""
 
+    def __init__(self, message: str, status: Optional[int] = None):
+        super().__init__(message)
+        self.status = status  # HTTP status code, if the application answered
+
 
 class Client:
     def __init__(self, config: AppConfig):
@@ -62,12 +66,13 @@ class Client:
 
         if resp.status_code == 401:
             raise ApiError(f"authentication failed (HTTP 401): check "
-                           f"{env_name(self.config.app, 'KEY')}")
+                           f"{env_name(self.config.app, 'KEY')}", 401)
         if resp.status_code == 403:
             raise ApiError("permission denied (HTTP 403): the key's user lacks "
-                           "the role this command needs")
+                           "the role this command needs", 403)
         if not resp.ok:
-            raise ApiError(f"HTTP {resp.status_code} from {method} {path}: {_brief(resp)}")
+            raise ApiError(f"HTTP {resp.status_code} from {method} {path}: {_brief(resp)}",
+                           resp.status_code)
         try:
             return resp.json()
         except ValueError:

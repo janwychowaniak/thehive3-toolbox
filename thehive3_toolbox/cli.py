@@ -10,8 +10,10 @@ from .client import Client
 from .config import env_name, load
 
 # Each application module lists its commands in COMMANDS and implements them as
-# cmd_<name>(client, args) -> exit status. An optional add_arguments(command,
-# parser) hook adds command-specific options.
+# cmd_<name>(client, args) -> exit status, with dashes in the name turned into
+# underscores. An optional add_arguments(command, parser) hook adds
+# command-specific options; commands in an optional JSON_ONLY set print JSON
+# anyway and get no --json option.
 APPS = {
     "hive": (hive, "TheHive 3.x"),
     "cortex": (cortex, "Cortex 2.x"),
@@ -41,6 +43,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--json", action="store_true", help="print JSON instead of text")
+    json_only = argparse.ArgumentParser(add_help=False)
+    json_only.set_defaults(json=True)
 
     apps = parser.add_subparsers(dest="app", metavar="APP", required=True)
     for app, (module, title) in APPS.items():
@@ -49,7 +53,8 @@ def build_parser() -> argparse.ArgumentParser:
         commands = app_parser.add_subparsers(dest="command", metavar="COMMAND", required=True)
         add_arguments = getattr(module, "add_arguments", None)
         for name, help_text in module.COMMANDS:
-            command = commands.add_parser(name, parents=[common], help=help_text,
+            parent = json_only if name in getattr(module, "JSON_ONLY", ()) else common
+            command = commands.add_parser(name, parents=[parent], help=help_text,
                                           description=help_text[0].upper() + help_text[1:] + ".")
             if add_arguments:
                 add_arguments(name, command)
@@ -64,7 +69,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         if config.verify is False and config.url.startswith("https://"):
             output.note(f"th3tb: warning: TLS certificate verification is disabled "
                         f"({env_name(args.app, 'VERIFY')})")
-        return getattr(module, f"cmd_{args.command}")(Client(config), args)
+        command = getattr(module, "cmd_" + args.command.replace("-", "_"))
+        return command(Client(config), args)
     except ToolboxError as exc:
         output.note(f"th3tb: error: {exc}")
         return 2

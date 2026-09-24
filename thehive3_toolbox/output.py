@@ -17,8 +17,8 @@ def text(value: Any) -> str:
     return str(value)
 
 
-def print_json(data: Any) -> None:
-    print(json.dumps(data, indent=2, ensure_ascii=False))
+def print_json(data: Any, sort_keys: bool = False) -> None:
+    print(json.dumps(data, indent=2, ensure_ascii=False, sort_keys=sort_keys))
 
 
 def print_fields(pairs: Iterable[Tuple[str, Any]]) -> None:
@@ -28,11 +28,17 @@ def print_fields(pairs: Iterable[Tuple[str, Any]]) -> None:
         print(f"{label:<{width}}  {text(value)}")
 
 
-def print_table(headers: Sequence[str], rows: Iterable[Sequence[Any]]) -> None:
-    cells: List[List[str]] = [list(headers)] + [[text(v) for v in row] for row in rows]
+def print_table(headers: Sequence[str], rows: Iterable[Sequence[Any]], max_width: int = 60) -> None:
+    """Cells longer than max_width are cut short; --json always has the full values."""
+    cells: List[List[str]] = [list(headers)] + [[_cut(text(v), max_width) for v in row]
+                                                for row in rows]
     widths = [max(len(row[i]) for row in cells) for i in range(len(headers))]
     for row in cells:
         print("  ".join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip())
+
+
+def _cut(value: str, width: int) -> str:
+    return value if len(value) <= width else value[:width - 3] + "..."
 
 
 def note(message: str) -> None:
