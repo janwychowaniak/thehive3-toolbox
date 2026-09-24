@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "thehive3-toolbox"
+description = "Command-line toolbox for administrators of TheHive 3.x and Cortex 2.x"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+dependencies = ["requests"]
+dynamic = ["version"]
+
+[project.scripts]
+th3tb = "thehive3_toolbox.cli:main"
+
+[tool.setuptools]
+packages = ["thehive3_toolbox"]
+
+[tool.setuptools.dynamic]
+version = {attr = "thehive3_toolbox.__version__"}

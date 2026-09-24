@@ -1,1 +1,153 @@
 # thehive3-toolbox
+
+`th3tb` is a small command-line toolbox for administrators of **TheHive 3.x** and
+**Cortex 2.x**, the Elasticsearch-based generation of both applications. It talks
+to their REST APIs only, and for now it only reads: nothing it does changes the
+state of an instance.
+
+TheHive and Cortex are handled separately, each with its own settings, so the
+toolbox works just as well against a partial stack (TheHive without Cortex, or
+the other way round).
+
+## Compatibility
+
+- TheHive 3.3 and 3.4: only API routes that already exist in TheHive 3.3 are used
+- Cortex 2.1
+- Python 3.8 or newer, with [requests](https://requests.readthedocs.io/) as the
+  only dependency
+
+Tested against TheHive 3.4.0 and Cortex 2.1.3, with requests 2.22 and 2.32.
+
+## Installation
+
+```sh
+git clone https://github.com/janwychowaniak/thehive3-toolbox.git
+cd thehive3-toolbox
+pip install .
+th3tb --help
+```
+
+No installation is needed on hosts where `requests` is already available (for
+example from the system's `python3-requests` package). Run it straight from the
+clone instead:
+
+```sh
+cd thehive3-toolbox
+python3 -m thehive3_toolbox --help
+```
+
+## Configuration
+
+Settings come from environment variables, one set per application:
+
+| TheHive             | Cortex                | Meaning                                    |
+|---------------------|-----------------------|--------------------------------------------|
+| `TH3TB_HIVE_URL`    | `TH3TB_CORTEX_URL`    | base URL of the application (required)     |
+| `TH3TB_HIVE_KEY`    | `TH3TB_CORTEX_KEY`    | API key (needed by every command but `status`) |
+| `TH3TB_HIVE_VERIFY` | `TH3TB_CORTEX_VERIFY` | TLS certificate verification (optional)    |
+
+```sh
+export TH3TB_HIVE_URL=https://thehive.example.com
+export TH3TB_HIVE_KEY=<api-key>
+```
+
+### TLS certificate verification
+
+The `*_VERIFY` variables only matter for `https://` URLs:
+
+- **unset**: the default verification of requests
+- **a path** to a CA bundle (a PEM file, or a directory prepared with `c_rehash`):
+  verify against that CA, typically a private one
+- **`false`**: no verification at all (for labs with self-signed certificates);
+  `th3tb` prints a warning on every run
+
+Mind where your requests comes from. Installed with pip, it trusts only the CA
+list bundled in the `certifi` package, not the system's trust store, so a private
+CA installed system-wide stays invisible to it. Distribution packages (Debian's
+and Ubuntu's `python3-requests`, for example) are patched to use the system store
+instead. Either way, pointing
+`*_VERIFY` at the CA works. requests' own `REQUESTS_CA_BUNDLE` variable is honoured
+too and applies to both applications, but `*_VERIFY` takes precedence.
+
+## Commands
+
+```
+th3tb hive   status | whoami | users  [--json]
+th3tb cortex status | whoami | users  [--json]
+```
+
+| Command  | What it shows | Needs |
+|----------|---------------|-------|
+| `status` | version, health of the components, authentication methods | no API key |
+| `whoami` | the user behind the configured API key and its roles | any valid key |
+| `users`  | users with their roles, status and whether they have an API key | TheHive: any valid key; Cortex: `orgadmin` (own organization) or `superadmin` (all organizations) |
+
+```
+$ th3tb hive status
+TheHive           3.4.0-1
+URL               https://thehive.example.com
+Status            WARNING
+Elasticsearch     WARNING
+Connector cortex  OK
+  cortex1         OK (version 2.1.3-1)
+Auth methods      key, local
+ZIP password      malware
+
+$ th3tb hive users
+LOGIN       NAME           ROLES               STATUS  API KEY
+alice       Alice Example  read, write, admin  Ok      no
+bob         Bob Example    read, write         Locked  no
+svc-alerts  Alert feed     read, write, alert  Ok      yes
+
+$ th3tb cortex users
+Users of organization analysts (orgadmin sees only its own)
+ORGANIZATION  LOGIN        NAME                 ROLES                    STATUS  API KEY  PASSWORD
+analysts      carol        Carol Example        read, analyze, orgadmin  Ok      no       yes
+analysts      svc-thehive  TheHive integration  read, analyze            Ok      yes      no
+```
+
+`--json` prints the same data as JSON. Notes and warnings go to stderr, so
+stdout can be piped (for example to `jq`).
+
+`users` never reads the API keys themselves, only whether a user has one. In
+Cortex, a key without a password usually marks an integration account.
+
+### Exit status
+
+| Code | Meaning |
+|------|---------|
+| 0 | success |
+| 1 | `status`: the application answers, but a component reports WARNING |
+| 2 | `status`: a component reports ERROR; any command: the request failed |
+
+This follows the usual monitoring-plugin convention, so `th3tb hive status` can
+serve as a health check. A single-node Elasticsearch whose indices have replicas
+is permanently yellow, which TheHive reports as WARNING.
+
+## Notes on the APIs
+
+- TheHive's `/api/health` never answers `Ok` once any connector (such as Cortex)
+  is configured, because it does not deduplicate the statuses it compares.
+  `status` therefore derives the health from the components listed by
+  `/api/status`.
+- The `ElasticSearch` version in TheHive's `/api/status` is the client library
+  bundled with TheHive, not the version of the cluster. Cortex reports both.
+- Cortex 2 does not implement `/api/health` (it answers 501) and reports no
+  component health, so for Cortex `status` only checks that the application
+  answers.
+- The ZIP password is the one TheHive uses to wrap downloaded attachments
+  (`datastore.attachment.password`, `malware` by default). The GUI shows it next
+  to every download, so it is not a secret.
+
+## Development
+
+Secret scanning with [gitleaks](https://github.com/gitleaks/gitleaks) runs in CI
+and in local git hooks. Enable the hooks once per clone:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+## License
+
+MIT
