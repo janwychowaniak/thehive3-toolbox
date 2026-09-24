@@ -65,15 +65,15 @@ Mind where your requests comes from. Installed with pip, it trusts only the CA
 list bundled in the `certifi` package, not the system's trust store, so a private
 CA installed system-wide stays invisible to it. Distribution packages (Debian's
 and Ubuntu's `python3-requests`, for example) are patched to use the system store
-instead. Either way, pointing
-`*_VERIFY` at the CA works. requests' own `REQUESTS_CA_BUNDLE` variable is honoured
-too and applies to both applications, but `*_VERIFY` takes precedence.
+instead. Either way, pointing `*_VERIFY` at the CA works. requests' own
+`REQUESTS_CA_BUNDLE` variable is honoured too and applies to both applications,
+but `*_VERIFY` takes precedence.
 
 ## Commands
 
 ```
 th3tb hive   status | whoami | users  [--json]
-th3tb cortex status | whoami | users  [--json]
+th3tb cortex status | whoami | users | analyzers | responders  [--json]
 ```
 
 | Command  | What it shows | Needs |
@@ -81,6 +81,7 @@ th3tb cortex status | whoami | users  [--json]
 | `status` | version, health of the components, authentication methods | no API key |
 | `whoami` | the user behind the configured API key and its roles | any valid key |
 | `users`  | users with their roles, status and whether they have an API key | TheHive: any valid key; Cortex: `orgadmin` (own organization) or `superadmin` (all organizations) |
+| `analyzers`, `responders` | Cortex only: workers enabled in the key's organization and the state of their definitions | any valid key; checking definitions needs `orgadmin` or `superadmin` |
 
 ```
 $ th3tb hive status
@@ -104,6 +105,14 @@ Users of organization analysts (orgadmin sees only its own)
 ORGANIZATION  LOGIN        NAME                 ROLES                    STATUS  API KEY  PASSWORD
 analysts      carol        Carol Example        read, analyze, orgadmin  Ok      no       yes
 analysts      svc-thehive  TheHive integration  read, analyze            Ok      yes      no
+
+$ th3tb cortex analyzers
+Analyzers enabled in organization lab: 4
+NAME           VERSION  STATE
+DnsLookup_1_0  1.0      ok
+GeoIp_2_0      2.0      definition missing (3.1 available)
+Retired_1_0    -        definition missing
+Sandbox_1_0    1.0      update available (1.2)
 ```
 
 `--json` prints the same data as JSON. Notes and warnings go to stderr, so
@@ -111,6 +120,13 @@ stdout can be piped (for example to `jq`).
 
 `users` never reads the API keys themselves, only whether a user has one. In
 Cortex, a key without a password usually marks an integration account.
+
+`analyzers` and `responders` compare each enabled worker with the catalog of
+definitions Cortex currently knows. Updating that catalog usually replaces a
+definition with a newer version, and workers still enabled on the old one stop
+working: they show up as `definition missing`, together with the version to
+enable instead. Worker configurations (which hold API keys of third-party
+services) are never shown.
 
 ### Exit status
 
@@ -146,6 +162,12 @@ and in local git hooks. Enable the hooks once per clone:
 
 ```sh
 git config core.hooksPath .githooks
+```
+
+Unit tests use only the standard library:
+
+```sh
+python3 -m unittest discover -s tests
 ```
 
 ## License

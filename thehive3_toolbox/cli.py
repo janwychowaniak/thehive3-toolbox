@@ -9,16 +9,12 @@ from . import ToolboxError, __version__, cortex, hive, output
 from .client import Client
 from .config import env_name, load
 
+# Each application module lists its commands in COMMANDS and implements them
+# as cmd_<name>(client, as_json) -> exit status.
 APPS = {
     "hive": (hive, "TheHive 3.x"),
     "cortex": (cortex, "Cortex 2.x"),
 }
-
-COMMANDS = [
-    ("status", "version and health of the application (no API key needed)"),
-    ("whoami", "the user behind the configured API key"),
-    ("users", "users with their roles, status and whether they have an API key"),
-]
 
 EPILOG = """\
 configuration (environment variables, set per application):
@@ -46,11 +42,11 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--json", action="store_true", help="print JSON instead of text")
 
     apps = parser.add_subparsers(dest="app", metavar="APP", required=True)
-    for app, (_, title) in APPS.items():
+    for app, (module, title) in APPS.items():
         app_parser = apps.add_parser(app, help=f"commands for {title}",
                                      description=f"Commands for {title}.")
         commands = app_parser.add_subparsers(dest="command", metavar="COMMAND", required=True)
-        for name, help_text in COMMANDS:
+        for name, help_text in module.COMMANDS:
             commands.add_parser(name, parents=[common], help=help_text,
                                 description=help_text[0].upper() + help_text[1:] + ".")
     return parser

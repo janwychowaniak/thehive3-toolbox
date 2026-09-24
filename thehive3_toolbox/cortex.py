@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+import re
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 from . import ToolboxError, output
 from .client import Client
+
+COMMANDS = [
+    ("status", "version of Cortex and of its Elasticsearch cluster (no API key needed)"),
+    ("whoami", "the user behind the configured API key"),
+    ("users", "users with their roles, status and whether they have an API key"),
+    ("analyzers", "enabled analyzers and the state of their definitions"),
+    ("responders", "enabled responders and the state of their definitions"),
+]
 
 
 def cmd_status(client: Client, as_json: bool) -> int:
@@ -91,3 +100,112 @@ def _user(raw: Dict[str, Any]) -> Dict[str, Any]:
         # A key without a password usually marks an integration account.
         "has_password": raw.get("hasPassword", False),
     }
+
+
+def cmd_analyzers(client: Client, as_json: bool) -> int:
+    return _workers(client, as_json, "analyzer")
+
+
+def cmd_responders(client: Client, as_json: bool) -> int:
+    return _workers(client, as_json, "responder")
+
+
+def _workers(client: Client, as_json: bool, kind: str) -> int:
+    # Enabled workers are listed per organization, to any user; the catalog of
+    # available definitions needs orgadmin or superadmin. As an orgadmin the
+    # listing also carries each worker's configuration, API keys of third-party
+    # services included; assess_workers() picks its fields explicitly, so none of
+    # it is ever shown.
+    me = client.get("/api/user/current")
+    workers = client.get(f"/api/{kind}", params={"range": "all"})
+    definitions = None
+    if {"orgadmin", "superadmin"} & set(me.get("roles", [])):
+        definitions = client.get(f"/api/{kind}definition")
+    records = assess_workers(workers, definitions)
+
+    output.note(f"{kind.capitalize()}s enabled in organization {me.get('organization')}: "
+                f"{len(records)}")
+    if definitions is None:
+        output.note("Checking definitions needs the orgadmin or superadmin role; "
+                    "states not checked.")
+    if as_json:
+        output.print_json(records)
+    else:
+        output.print_table(["NAME", "VERSION", "STATE"],
+                           [[r["name"], r["version"], _state_text(r)] for r in records])
+    return 0
+
+
+def assess_workers(workers: List[Dict[str, Any]],
+                   definitions: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """Match enabled workers against the catalog of worker definitions.
+
+    A worker points to its definition by id, which Cortex builds as
+    "<name>_<version>" with dots turned into underscores. Updating the catalog
+    usually replaces a definition with a newer version, which leaves workers
+    enabled on the old one pointing to nothing: they stop working until the new
+    version is enabled. With definitions=None (catalog not readable) the states
+    stay unknown.
+    """
+    newest: Dict[str, Dict[str, Any]] = {}
+    for definition in definitions or []:
+        known = newest.get(definition["name"])
+        if known is None or _version_key(definition["version"]) > _version_key(known["version"]):
+            newest[definition["name"]] = definition
+    catalog = {d["id"]: d for d in definitions or []}
+
+    records = []
+    for worker in sorted(workers, key=lambda w: w.get("name") or ""):
+        definition_id = worker.get("workerDefinitionId")
+        record = {
+            "name": worker.get("name"),
+            "definition_id": definition_id,
+            "version": worker.get("version"),
+            "state": None,  # ok, update_available or definition_missing
+            "available_version": None,
+            "data_types": worker.get("dataTypeList", []),
+        }
+        if definitions is not None:
+            definition = catalog.get(definition_id)
+            if definition is not None:
+                name, version = definition["name"], definition["version"]
+            else:
+                name, version = _split_definition_id(definition_id or "", newest)
+            record["version"] = version
+            latest = newest.get(name) if name else None
+            if definition is None:
+                record["state"] = "definition_missing"
+            elif latest and _version_key(latest["version"]) > _version_key(version):
+                record["state"] = "update_available"
+            else:
+                record["state"] = "ok"
+            if record["state"] != "ok" and latest:
+                record["available_version"] = latest["version"]
+        records.append(record)
+    return records
+
+
+def _split_definition_id(definition_id: str,
+                         names: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    """Name and version of a definition id whose definition is gone, as far as a
+    name still in the catalog allows telling them apart."""
+    matches = [n for n in names
+               if definition_id.startswith(n + "_")
+               and re.fullmatch(r"\d[\w-]*", definition_id[len(n) + 1:])]
+    if not matches:
+        return None, None
+    name = max(matches, key=len)
+    return name, definition_id[len(name) + 1:].replace("_", ".")
+
+
+def _version_key(version: Optional[str]) -> Tuple[int, ...]:
+    return tuple(int(n) for n in re.findall(r"\d+", version or ""))
+
+
+def _state_text(record: Dict[str, Any]) -> str:
+    state, available = record["state"], record["available_version"]
+    if state == "update_available":
+        return f"update available ({available})"
+    if state == "definition_missing":
+        return f"definition missing ({available} available)" if available else "definition missing"
+    return state or "-"

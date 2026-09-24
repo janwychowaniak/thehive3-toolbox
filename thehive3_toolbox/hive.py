@@ -7,6 +7,12 @@ from typing import Any, Dict
 from . import output
 from .client import Client
 
+COMMANDS = [
+    ("status", "version and health of TheHive and its connectors (no API key needed)"),
+    ("whoami", "the user behind the configured API key"),
+    ("users", "users with their roles, status and whether they have an API key"),
+]
+
 # /api/status reports Elasticsearch and connector health as OK / WARNING / ERROR.
 # Anything else ("UNKNOWN", 3.4's "Init" right after start-up, a connector that has
 # not been checked yet) counts as WARNING.
